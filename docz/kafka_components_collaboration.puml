@@ -1,0 +1,274 @@
+@startuml Kafka Components Collaboration
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+title Kafka 核心组件协作流程图
+
+autonumber
+
+actor "Application" as APP
+box "Producer Client" #LightBlue
+    participant "KafkaProducer" as PROD
+    participant "RecordAccumulator" as ACC
+    participant "Sender" as SENDER
+    participant "Partitioner" as PART
+end box
+
+box "Broker Server" #LightGreen
+    participant "SocketServer" as SS
+    participant "KafkaApis" as APIS
+    participant "ReplicaManager" as RM
+    participant "LogManager" as LM
+    participant "UnifiedLog" as LOG
+    participant "GroupCoordinator" as GC
+end box
+
+box "Consumer Client" #LightYellow
+    participant "KafkaConsumer" as CONS
+    participant "ConsumerCoordinator" as CC
+    participant "Fetcher" as FETCH
+    participant "SubscriptionState" as SUB
+end box
+
+box "Stream Processing" #LightCoral
+    participant "KafkaStreams" as STREAMS
+    participant "StreamThread" as ST
+    participant "StreamTask" as TASK
+    participant "StateStore" as STATE
+end box
+
+== Producer 发送消息流程 ==
+
+APP -> PROD : send(ProducerRecord)
+note right of PROD
+  **代码位置**:
+  clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java
+  - doSend() 方法
+end note
+
+PROD -> PROD : serialize(key, value)
+PROD -> PART : partition(topic, key, value, cluster)
+note right of PART
+  **分区策略**:
+  - 指定分区：直接使用
+  - 有key：hash(key) % partitions
+  - 无key：轮询或粘性分区
+end note
+
+PART -> PROD : partitionId
+PROD -> ACC : append(topic, partition, record)
+note right of ACC
+  **批量累积**:
+  clients/src/main/java/org/apache/kafka/clients/producer/internals/RecordAccumulator.java
+  - 按分区组织批次
+  - 内存池管理
+  - 批次大小控制
+end note
+
+ACC -> SENDER : wakeup() [if batch full]
+note right of SENDER
+  **异步发送**:
+  clients/src/main/java/org/apache/kafka/clients/producer/internals/Sender.java
+  - 后台I/O线程
+  - 批次发送优化
+end note
+
+SENDER -> SS : ProduceRequest
+note right of SS
+  **网络层**:
+  core/src/main/scala/kafka/network/SocketServer.scala
+  - Acceptor + Processor + Handler 模式
+  - NIO多路复用
+end note
+
+== Broker 处理生产请求 ==
+
+SS -> APIS : handleProduceRequest()
+note right of APIS
+  **API处理**:
+  core/src/main/scala/kafka/server/KafkaApis.scala
+  - 请求路由和验证
+  - 权限检查
+end note
+
+APIS -> RM : appendRecords()
+note right of RM
+  **副本管理**:
+  core/src/main/scala/kafka/server/ReplicaManager.scala
+  - ISR管理
+  - 高水位更新
+  - 副本同步
+end note
+
+RM -> LM : appendAsLeader()
+note right of LM
+  **日志管理**:
+  core/src/main/scala/kafka/log/LogManager.scala
+  - 日志创建和管理
+  - 清理策略
+end note
+
+LM -> LOG : append(records)
+note right of LOG
+  **存储引擎**:
+  core/src/main/scala/kafka/log/UnifiedLog.scala
+  - 日志段管理
+  - 索引维护
+  - 压缩和清理
+end note
+
+LOG -> LOG : updateIndex()
+LOG -> RM : LogAppendInfo
+RM -> APIS : ProduceResponse
+APIS -> SS : sendResponse()
+SS -> SENDER : ProduceResponse
+SENDER -> PROD : RecordMetadata
+PROD -> APP : Future<RecordMetadata>
+
+== Consumer 消费消息流程 ==
+
+APP -> CONS : subscribe(topics)
+note right of CONS
+  **消费者入口**:
+  clients/src/main/java/org/apache/kafka/clients/consumer/KafkaConsumer.java
+  - 委托给具体实现
+end note
+
+CONS -> SUB : subscribe(topics, listener)
+note right of SUB
+  **订阅状态**:
+  clients/src/main/java/org/apache/kafka/clients/consumer/internals/SubscriptionState.java
+  - 主题订阅管理
+  - 分区分配状态
+  - 偏移量跟踪
+end note
+
+CONS -> CC : poll() [if has group.id]
+note right of CC
+  **消费者协调**:
+  clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerCoordinator.java
+  - 组成员管理
+  - 重平衡协调
+  - 偏移量提交
+end note
+
+== Consumer Group 协调流程 ==
+
+CC -> GC : JoinGroupRequest
+note right of GC
+  **组协调器**:
+  org.apache.kafka.coordinator.group.GroupCoordinator
+  - 成员管理
+  - 分区分配
+  - 偏移量存储
+end note
+
+GC -> CC : JoinGroupResponse(leader/follower)
+
+alt 如果是Leader
+    CC -> CC : performAssignment()
+    note right of CC
+      **分区分配策略**:
+      - RangeAssignor: 按主题范围分配
+      - RoundRobinAssignor: 轮询分配
+      - StickyAssignor: 粘性分配
+      - CooperativeStickyAssignor: 协作式粘性
+    end note
+    CC -> GC : SyncGroupRequest(assignments)
+else 如果是Follower
+    CC -> GC : SyncGroupRequest(empty)
+end
+
+GC -> CC : SyncGroupResponse(assignment)
+CC -> SUB : assignFromSubscribed(partitions)
+
+== Consumer 拉取数据流程 ==
+
+APP -> CONS : poll(timeout)
+CONS -> FETCH : sendFetches()
+note right of FETCH
+  **数据拉取**:
+  clients/src/main/java/org/apache/kafka/clients/consumer/internals/Fetcher.java
+  - 批量拉取优化
+  - 预取机制
+  - 反序列化
+end note
+
+FETCH -> SS : FetchRequest
+SS -> APIS : handleFetchRequest()
+APIS -> RM : fetchMessages()
+RM -> LOG : read(offset, maxBytes)
+LOG -> RM : FetchDataInfo
+RM -> APIS : FetchResponse
+APIS -> SS : sendResponse()
+SS -> FETCH : FetchResponse
+FETCH -> CONS : ConsumerRecords
+CONS -> APP : ConsumerRecords<K,V>
+
+== Stream 处理流程 ==
+
+APP -> STREAMS : new KafkaStreams(topology, config)
+note right of STREAMS
+  **流处理主类**:
+  streams/src/main/java/org/apache/kafka/streams/KafkaStreams.java
+  - 拓扑管理
+  - 线程协调
+  - 状态管理
+end note
+
+APP -> STREAMS : start()
+STREAMS -> ST : start() [for each thread]
+note right of ST
+  **流处理线程**:
+  streams/src/main/java/org/apache/kafka/streams/processor/internals/StreamThread.java
+  - 任务调度
+  - 消费者管理
+  - 生产者管理
+end note
+
+ST -> TASK : process()
+note right of TASK
+  **流处理任务**:
+  streams/src/main/java/org/apache/kafka/streams/processor/internals/StreamTask.java
+  - 处理器链执行
+  - 状态存储访问
+  - 输出记录生成
+end note
+
+TASK -> STATE : get/put(key, value)
+note right of STATE
+  **状态存储**:
+  streams/src/main/java/org/apache/kafka/streams/state/
+  - RocksDB持久化存储
+  - 内存存储
+  - 变更日志备份
+end note
+
+TASK -> PROD : send(outputRecord) [内部Producer]
+PROD -> SS : ProduceRequest [输出到下游主题]
+
+== 关键协作模式 ==
+
+note over APP, STATE
+  **1. 生产者模式**:
+  - 批量累积 + 异步发送
+  - 分区策略 + 负载均衡
+  - 幂等性 + 事务支持
+  
+  **2. 消费者模式**:
+  - 组协调 + 自动重平衡
+  - 偏移量管理 + 容错恢复
+  - 拉取模式 + 背压控制
+  
+  **3. 存储模式**:
+  - 分区日志 + 副本机制
+  - 顺序写入 + 索引优化
+  - 压缩清理 + 分层存储
+  
+  **4. 流处理模式**:
+  - 拓扑构建 + 任务分配
+  - 状态管理 + 容错恢复
+  - 时间语义 + 窗口操作
+end note
+
+@enduml

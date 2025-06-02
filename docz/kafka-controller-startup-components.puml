@@ -1,0 +1,498 @@
+@startuml Kafka控制器启动组件架构图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam classBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+' 为不同类型的组件设置不同的背景色
+skinparam class {
+    BackgroundColor<<core>> #E3F2FD
+    BackgroundColor<<network>> #E8F5E8
+    BackgroundColor<<metadata>> #FFF3E0
+    BackgroundColor<<security>> #FCE4EC
+    BackgroundColor<<monitoring>> #F3E5F5
+    BackgroundColor<<quota>> #E0F2F1
+    BackgroundColor<<publisher>> #FFF8E1
+    BackgroundColor<<registration>> #E1F5FE
+    BackgroundColor<<config>> #F1F8E9
+    BackgroundColor<<policy>> #FFEBEE
+    BackgroundColor<<fault>> #EFEBE9
+    BackgroundColor<<tool>> #FAFAFA
+}
+
+title Kafka控制器服务器启动组件架构图
+
+package "核心控制器" {
+    class ControllerServer <<core>> {
+        - sharedServer: SharedServer
+        - configSchema: KafkaConfigSchema
+        - bootstrapMetadata: BootstrapMetadata
+        - status: ProcessStatus
+        - lock: ReentrantLock
+        + startup(): Unit
+        + shutdown(): Unit
+        + awaitShutdown(): Unit
+        - maybeChangeStatus(): Boolean
+    }
+
+    class QuorumController <<core>> {
+        - nodeId: int
+        - clusterId: String
+        - queue: KafkaEventQueue
+        - time: Time
+        - configSchema: KafkaConfigSchema
+        - raftClient: RaftClient
+        - quorumFeatures: QuorumFeatures
+        - controllerMetrics: QuorumControllerMetrics
+        + beginShutdown(): Unit
+        + close(): Unit
+        + waitForReadyBrokers(): CompletableFuture
+    }
+
+    class "QuorumController_Builder" <<core>> {
+        + setTime(Time): Builder
+        + setRaftClient(RaftClient): Builder
+        + setQuorumFeatures(QuorumFeatures): Builder
+        + setMetrics(QuorumControllerMetrics): Builder
+        + build(): QuorumController
+    }
+}
+
+package "监控指标系统" {
+    class LinuxIoMetricsCollector <<monitoring>> {
+        - time: Time
+        - path: Path
+        - lastUpdateMs: long
+        - cachedReadBytes: long
+        - cachedWriteBytes: long
+        + readBytes(): long
+        + writeBytes(): long
+        + usable(): boolean
+        - updateValues(long): boolean
+    }
+
+    class QuorumControllerMetrics <<monitoring>> {
+        - registry: MetricRegistry
+        - time: Time
+        - brokerSessionTimeoutMs: long
+        + close(): Unit
+    }
+
+    class KafkaMetricsGroup <<monitoring>> {
+        + newGauge(String, Supplier): Unit
+        + removeMetric(String): Unit
+    }
+}
+
+package "安全认证组件" {
+    class DelegationTokenCache <<security>> {
+        - credentialCache: CredentialCache
+        - tokenCache: Map<String, TokenInformation>
+        - hmacTokenIdCache: Map<String, String>
+        - tokenIdHmacCache: Map<String, String>
+        + updateCache(DelegationToken, Map): Unit
+        + removeCache(String): Unit
+        + tokenForHmac(String): TokenInformation
+        + tokens(): Collection<TokenInformation>
+    }
+
+    class CredentialProvider <<security>> {
+        + tokenCache: DelegationTokenCache
+        + credentialCache: CredentialCache
+        + updateCredential(ScramMechanism, String, ScramCredential): Unit
+        + removeCredentials(ScramMechanism, String): Unit
+    }
+
+    interface "Plugin<T>" <<security>> {
+        + get(): T
+    }
+
+    interface Authorizer <<security>> {
+        + authorize(): AuthorizationResult
+        + createAcls(): List<AclCreateResult>
+        + deleteAcls(): List<AclDeleteResult>
+    }
+}
+
+package "元数据管理系统" {
+    class KRaftMetadataCache <<metadata>> {
+        - nodeId: int
+        - kraftVersionSupplier: Supplier<KRaftVersion>
+        - _currentImage: MetadataImage
+        + setImage(MetadataImage): Unit
+        + getImage(): MetadataImage
+        + contains(String): boolean
+        + contains(TopicPartition): boolean
+        + config(ConfigResource): Properties
+    }
+
+    class KRaftMetadataCachePublisher <<metadata>> {
+        - metadataCache: KRaftMetadataCache
+        + name(): String
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): Unit
+    }
+
+    class FeaturesPublisher <<metadata>> {
+        - log: Logger
+        - finalizedFeatures: FinalizedFeatures
+        + features(): FinalizedFeatures
+        + name(): String
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): Unit
+    }
+
+    class ControllerRegistrationsPublisher <<metadata>> {
+        + name(): String
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): Unit
+    }
+
+    interface MetadataPublisher <<metadata>> {
+        + name(): String
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): Unit
+    }
+}
+
+package "网络服务组件" {
+    class SocketServer <<network>> {
+        - config: KafkaConfig
+        - metrics: Metrics
+        - time: Time
+        - credentialProvider: CredentialProvider
+        - apiVersionManager: ApiVersionManager
+        - dataPlaneRequestChannel: RequestChannel
+        + enableRequestProcessing(Map): CompletableFuture
+        + stopProcessingRequests(): Unit
+        + shutdown(): Unit
+        + boundPort(ListenerName): int
+    }
+
+    class SimpleApiVersionManager <<network>> {
+        - listenerType: ListenerType
+        - enableUnstableLastVersion: boolean
+        - kraftVersionSupplier: Supplier<KRaftVersion>
+        + apiVersionResponse(short): ApiVersionsResponse
+        + isApiEnabled(ApiKeys): boolean
+    }
+
+    class ListenerInfo <<network>> {
+        + create(Collection<Endpoint>): ListenerInfo
+        + withWildcardHostnamesResolved(): ListenerInfo
+        + withEphemeralPortsCorrected(Function): ListenerInfo
+        + listeners(): Map<String, Endpoint>
+        + firstListener(): Endpoint
+    }
+}
+
+package "API处理组件" {
+    class ControllerApis <<core>> {
+        - requestChannel: RequestChannel
+        - authorizerPlugin: Option<Plugin<Authorizer>>
+        - quotas: QuotaManagers
+        - time: Time
+        - controller: Controller
+        - raftManager: RaftManager
+        - config: KafkaConfig
+        + handle(RequestChannel.Request): Unit
+        + close(): Unit
+        + isClosed(): boolean
+    }
+
+    class KafkaRequestHandlerPool <<network>> {
+        - brokerId: int
+        - requestChannel: RequestChannel
+        - apis: ApiRequestHandler
+        - time: Time
+        - numThreads: int
+        + shutdown(): Unit
+        + resize(int): Unit
+    }
+
+    class QuotaManagers <<quota>> {
+        - fetch: ClientQuotaManager
+        - produce: ClientQuotaManager
+        - request: ClientRequestQuotaManager
+        - controllerMutation: ControllerMutationQuotaManager
+        + shutdown(): Unit
+    }
+
+    class ClientQuotaMetadataManager <<quota>> {
+        - quotaManagers: QuotaManagers
+        - connectionQuotas: ConnectionQuotas
+        + updateClientQuotas(Map): Unit
+        + removeClientQuotas(Set): Unit
+    }
+}
+
+package "注册管理组件" {
+    class ControllerRegistrationManager {
+        - nodeId: int
+        - clusterId: String
+        - time: Time
+        - threadNamePrefix: String
+        - supportedFeatures: Map<String, VersionRange>
+        - incarnationId: Uuid
+        - listenerInfo: ListenerInfo
+        + start(NodeToControllerChannelManager): Unit
+        + close(): Unit
+    }
+
+    class NodeToControllerChannelManagerImpl {
+        - controllerNodeProvider: ControllerNodeProvider
+        - time: Time
+        - metrics: Metrics
+        - config: KafkaConfig
+        - channelName: String
+        - threadNamePrefix: String
+        - retryTimeoutMs: long
+        + start(): Unit
+        + shutdown(): Unit
+    }
+}
+
+package "发布器组件" {
+    class DynamicConfigPublisher {
+        - config: KafkaConfig
+        - faultHandler: FaultHandler
+        - configHandlers: Map<ConfigType, ConfigHandler>
+        - nodeType: String
+        + name(): String
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): Unit
+    }
+
+    class DynamicClientQuotaPublisher {
+        - conf: KafkaConfig
+        - faultHandler: FaultHandler
+        - nodeType: String
+        - clientQuotaMetadataManager: ClientQuotaMetadataManager
+        + name(): String
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): Unit
+    }
+
+    class DynamicTopicClusterQuotaPublisher {
+        - clusterId: String
+        - conf: KafkaConfig
+        - faultHandler: FaultHandler
+        - nodeType: String
+        - quotaManagers: QuotaManagers
+        + name(): String
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): Unit
+    }
+
+    class ScramPublisher {
+        - config: KafkaConfig
+        - faultHandler: FaultHandler
+        - nodeType: String
+        - credentialProvider: CredentialProvider
+        + name(): String
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): Unit
+    }
+
+    class DelegationTokenPublisher {
+        - config: KafkaConfig
+        - faultHandler: FaultHandler
+        - nodeType: String
+        - delegationTokenManager: DelegationTokenManager
+        + name(): String
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): Unit
+    }
+
+    class AclPublisher {
+        - nodeId: int
+        - faultHandler: FaultHandler
+        - nodeType: String
+        - authorizerPlugin: Optional<Plugin<Authorizer>>
+        + name(): String
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): Unit
+    }
+}
+
+' 关系定义 - 连接线颜色与目标组件背景色对应
+' 创建关系
+ControllerServer -[#E3F2FD]-> QuorumController : 创建和管理
+ControllerServer -[#F3E5F5]-> LinuxIoMetricsCollector : 创建
+ControllerServer -[#FCE4EC]-> DelegationTokenCache : 创建
+ControllerServer -[#FCE4EC]-> CredentialProvider : 创建
+ControllerServer -[#FFF3E0]-> KRaftMetadataCache : 创建
+ControllerServer -[#E8F5E8]-> SocketServer : 创建
+ControllerServer -[#E3F2FD]-> ControllerApis : 创建
+ControllerServer -[#E8F5E8]-> KafkaRequestHandlerPool : 创建
+ControllerServer -[#E0F2F1]-> QuotaManagers : 创建
+ControllerServer -[#E1F5FE]-> ControllerRegistrationManager : 创建
+
+' 构建关系
+"QuorumController_Builder" -[#E3F2FD]-> QuorumController : 构建
+
+' 使用关系
+QuorumController -[#F3E5F5]-> QuorumControllerMetrics : 使用
+CredentialProvider -[#FCE4EC]-> DelegationTokenCache : 依赖
+KRaftMetadataCachePublisher -[#FFF3E0]-> KRaftMetadataCache : 依赖
+SocketServer -[#FCE4EC]-> CredentialProvider : 使用
+SocketServer -[#E8F5E8]-> SimpleApiVersionManager : 使用
+ControllerApis -[#E0F2F1]-> QuotaManagers : 使用
+ControllerApis -[#E3F2FD]-> QuorumController : 使用
+ControllerApis -[#FFF3E0]-> KRaftMetadataCache : 使用
+KafkaRequestHandlerPool -[#E3F2FD]-> ControllerApis : 使用
+ClientQuotaMetadataManager -[#E0F2F1]-> QuotaManagers : 使用
+ControllerRegistrationManager -[#E1F5FE]-> NodeToControllerChannelManagerImpl : 使用
+DynamicClientQuotaPublisher -[#E0F2F1]-> ClientQuotaMetadataManager : 使用
+DynamicTopicClusterQuotaPublisher -[#E0F2F1]-> QuotaManagers : 使用
+ScramPublisher -[#FCE4EC]-> CredentialProvider : 使用
+
+' 实现关系（虚线）
+Plugin ..|> Authorizer : 泛型实现
+KRaftMetadataCachePublisher ..|> MetadataPublisher : 实现
+FeaturesPublisher ..|> MetadataPublisher : 实现
+ControllerRegistrationsPublisher ..|> MetadataPublisher : 实现
+DynamicConfigPublisher ..|> MetadataPublisher : 实现
+DynamicClientQuotaPublisher ..|> MetadataPublisher : 实现
+DynamicTopicClusterQuotaPublisher ..|> MetadataPublisher : 实现
+ScramPublisher ..|> MetadataPublisher : 实现
+DelegationTokenPublisher ..|> MetadataPublisher : 实现
+AclPublisher ..|> MetadataPublisher : 实现
+
+note top of ControllerServer : 控制器服务器主类\n负责协调所有组件的启动
+note right of QuorumController : KRaft模式下的核心控制器\n处理集群元数据和领导者选举
+note bottom of MetadataPublisher : 元数据发布器接口\n用于处理元数据变更通知
+note left of SocketServer : 网络服务器\n处理客户端连接和请求
+
+' 启动流程序列
+package "启动流程" {
+    class StartupSequence {
+        1. 状态管理和超时设置
+        2. 基础组件初始化
+        3. 监控指标系统初始化
+        4. 安全认证组件初始化
+        5. 元数据管理系统初始化
+        6. 网络服务初始化
+        7. 控制器核心组件构建
+        8. API处理器初始化
+        9. 元数据发布器注册
+        10. 服务启动和同步
+        11. 注册管理器启动
+        12. 启动完成同步
+    }
+}
+
+' 组件分类标记
+package "工具类组件" {
+    class Deadline {
+        + fromDelay(Time, long, TimeUnit): Deadline
+        + hasTimeLeft(): boolean
+        + nanosLeft(): long
+    }
+
+    class FutureUtils {
+        + waitWithLogging(Logger, String, String, CompletableFuture, Deadline, Time): T
+        + completeAll(List<CompletableFuture>): CompletableFuture
+    }
+
+    class Utils {
+        + closeQuietly(Closeable, String): Unit
+        + swallow(Runnable): Unit
+    }
+}
+
+' 配置相关组件
+package "配置管理" {
+    class KafkaConfig {
+        - nodeId: int
+        - clusterId: String
+        - dynamicConfig: DynamicBrokerConfig
+        + createNewAuthorizer(Metrics, String): Option<Plugin<Authorizer>>
+        + getConfiguredInstance(String, Class): T
+    }
+
+    class DynamicBrokerConfig {
+        + initialize(Option): Unit
+        + addReconfigurables(Reconfigurable): Unit
+        + clear(): Unit
+    }
+
+    class BootstrapMetadata {
+        + metadataVersion(): MetadataVersion
+        + records(): List<ApiMessageAndVersion>
+    }
+
+    class KafkaConfigSchema {
+        + configKeys(): Map<String, ConfigDef.ConfigKey>
+        + validate(Map): Map<String, Object>
+    }
+}
+
+' 策略组件
+package "策略组件" {
+    interface CreateTopicPolicy {
+        + validate(RequestMetadata): Unit
+        + close(): Unit
+    }
+
+    interface AlterConfigPolicy {
+        + validate(RequestMetadata): Unit
+        + close(): Unit
+    }
+
+    class ControllerConfigurationValidator {
+        - brokerConfig: KafkaConfig
+        + validate(ConfigResource, Map): Unit
+    }
+}
+
+' 故障处理组件
+package "故障处理" {
+    interface FaultHandler {
+        + handleFault(String, Throwable): RuntimeException
+    }
+
+    class SharedServer {
+        + fatalQuorumControllerFaultHandler: FaultHandler
+        + nonFatalQuorumControllerFaultHandler: FaultHandler
+        + controllerStartupFaultHandler: FaultHandler
+        + metadataPublishingFaultHandler: FaultHandler
+    }
+}
+
+' 更新关系 - 使用颜色编码
+ControllerServer -[#green]-> KafkaConfig : 使用配置
+ControllerServer -[#green]-> BootstrapMetadata : 使用引导元数据
+ControllerServer -[#green]-> KafkaConfigSchema : 使用配置模式
+ControllerServer -[#green]-> SharedServer : 依赖共享服务器
+
+QuorumController -[#red]-> CreateTopicPolicy : 可选使用
+QuorumController -[#red]-> AlterConfigPolicy : 可选使用
+QuorumController -[#green]-> ControllerConfigurationValidator : 使用
+QuorumController -[#green]-> FaultHandler : 使用故障处理器
+
+KafkaConfig -[#green]-> DynamicBrokerConfig : 包含动态配置
+
+StartupSequence ..|> ControllerServer : 描述启动过程
+
+note right of StartupSequence : 启动流程按顺序执行\n确保组件依赖关系正确
+note top of FaultHandler : 故障处理器接口\n用于处理各种异常情况
+note bottom of KafkaConfig : Kafka配置类\n包含所有配置参数
+
+' 图例说明
+note as Legend
+    <b>组件颜色分类：</b>
+    • <color:#E3F2FD>蓝色</color>：核心控制组件
+    • <color:#E8F5E8>绿色</color>：网络通信组件
+    • <color:#FFF3E0>橙色</color>：元数据管理组件
+    • <color:#FCE4EC>粉色</color>：安全认证组件
+    • <color:#F3E5F5>紫色</color>：监控指标组件
+    • <color:#E0F2F1>青色</color>：配额管理组件
+    • <color:#FFF8E1>黄色</color>：发布器组件
+    • <color:#E1F5FE>浅蓝</color>：注册管理组件
+
+    <b>连接线颜色：</b>
+    • 连接线颜色与目标组件背景色相同
+    • 便于快速识别依赖的目标组件类型
+    • 虚线表示接口实现关系
+
+    <b>启动顺序：</b>
+    1. 被依赖的组件先启动
+    2. 同层组件可以并行启动
+    3. 创建关系优先于使用关系
+end note
+
+@enduml

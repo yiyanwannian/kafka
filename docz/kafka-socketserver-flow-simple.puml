@@ -1,0 +1,52 @@
+@startuml Kafka 请求处理流程简化图
+
+!define LIGHTBLUE #E1F5FE
+!define LIGHTGREEN #E8F5E8
+!define LIGHTYELLOW #FFF9C4
+!define LIGHTPINK #FCE4EC
+
+title Kafka 请求处理流程
+
+skinparam componentStyle rectangle
+skinparam backgroundColor white
+
+' 定义组件
+[Client] as Client LIGHTBLUE
+[Acceptor] as Acceptor LIGHTGREEN
+[Processor] as Processor LIGHTGREEN
+[RequestChannel] as Channel LIGHTYELLOW
+[Handler] as Handler LIGHTPINK
+
+' 定义队列
+queue RequestQueue as ReqQ
+queue ResponseQueue as RespQ
+
+' 连接关系
+Client -right-> Acceptor : TCP 连接
+Acceptor -right-> Processor : 分发连接
+Processor -down-> ReqQ : 请求入队
+ReqQ -right-> Channel : 缓冲请求
+Channel -right-> Handler : 取出请求
+Handler -down-> RespQ : 响应入队
+RespQ -left-> Processor : 取出响应
+Processor -up-> Client : 发送响应
+
+' 标注
+note top of Acceptor : 接受连接
+note top of Processor : 网络 I/O
+note right of Channel : 请求-响应\n缓冲通道
+note top of Handler : 业务处理
+
+' 流程说明
+note bottom
+  **核心流程：**
+  1. Client 建立 TCP 连接到 Acceptor
+  2. Acceptor 将连接分发给 Processor
+  3. Processor 接收请求并放入 RequestQueue
+  4. Handler 从 RequestQueue 取出请求处理
+  5. Handler 将响应放入 ResponseQueue
+  6. Processor 从 ResponseQueue 取出响应
+  7. Processor 将响应发送给 Client
+end note
+
+@enduml

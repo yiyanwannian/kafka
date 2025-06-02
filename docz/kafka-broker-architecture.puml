@@ -1,0 +1,245 @@
+@startuml Kafka Broker 架构图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam componentBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+' 为不同层次的组件设置不同的背景色
+skinparam component {
+    BackgroundColor<<network>> #E8F5E8
+    BackgroundColor<<request>> #E3F2FD
+    BackgroundColor<<replica>> #FFF3E0
+    BackgroundColor<<log>> #FCE4EC
+    BackgroundColor<<storage>> #F3E5F5
+    BackgroundColor<<coordinator>> #E0F2F1
+    BackgroundColor<<security>> #FFF8E1
+    BackgroundColor<<metrics>> #FFEBEE
+}
+
+title Kafka Broker 详细架构图
+
+package "网络层 (core/src/main/scala/kafka/network/)" {
+    [SocketServer] <<network>> as SS
+    [Acceptor] <<network>> as ACC
+    [Processor] <<network>> as PROC
+    [RequestChannel] <<network>> as RC
+    [ConnectionQuotas] <<network>> as CQ
+}
+
+package "请求处理层 (core/src/main/scala/kafka/server/)" {
+    [KafkaApis] <<request>> as KAPI
+    [KafkaRequestHandlerPool] <<request>> as KRHP
+    [RequestHandlerHelper] <<request>> as RHH
+    [AuthHelper] <<request>> as AH
+}
+
+package "副本管理层 (core/src/main/scala/kafka/server/)" {
+    [ReplicaManager] <<replica>> as RM
+    [Partition] <<replica>> as PART
+    [DelayedOperationPurgatory] <<replica>> as DOP
+    [LogDirFailureHandler] <<replica>> as LDFH
+}
+
+package "日志管理层 (core/src/main/scala/kafka/log/)" {
+    [LogManager] <<log>> as LM
+    [UnifiedLog] <<log>> as UL
+    [LogCleaner] <<log>> as LC
+    [LogCleanerManager] <<log>> as LCM
+}
+
+package "存储层 (storage/src/main/java/org/apache/kafka/storage/)" {
+    [LogSegment] <<storage>> as LS
+    [OffsetIndex] <<storage>> as OI
+    [TimeIndex] <<storage>> as TI
+    [TransactionIndex] <<storage>> as TXI
+    [FileRecords] <<storage>> as FR
+}
+
+package "协调器层 (core/src/main/scala/kafka/coordinator/)" {
+    [GroupCoordinator] <<coordinator>> as GC
+    [TransactionCoordinator] <<coordinator>> as TC
+    [ShareCoordinator] <<coordinator>> as SC
+}
+
+package "安全层 (core/src/main/scala/kafka/security/)" {
+    [Authorizer] <<security>> as AUTH
+    [CredentialProvider] <<security>> as CP
+    [DelegationTokenCache] <<security>> as DTC
+}
+
+package "监控层 (core/src/main/scala/kafka/server/)" {
+    [BrokerTopicStats] <<metrics>> as BTS
+    [KafkaMetricsGroup] <<metrics>> as KMG
+    [QuotaManagers] <<metrics>> as QM
+}
+
+' 网络层内部连接 - 连接线颜色与目标组件背景色对应
+SS -[#E8F5E8]-> ACC : 管理 Acceptor
+SS -[#E8F5E8]-> PROC : 管理 Processor
+SS -[#E8F5E8]-> RC : 使用 RequestChannel
+SS -[#E8F5E8]-> CQ : 连接配额管理
+
+ACC -[#E8F5E8]-> PROC : 分发连接
+PROC -[#E8F5E8]-> RC : 请求入队/响应出队
+
+' 请求处理层连接
+RC -[#E3F2FD]-> KRHP : 请求分发
+KRHP -[#E3F2FD]-> KAPI : 处理请求
+KAPI -[#E3F2FD]-> RHH : 辅助处理
+KAPI -[#FFF8E1]-> AH : 权限检查
+
+' 副本管理层连接
+KAPI -[#FFF3E0]-> RM : 调用副本管理
+RM -[#FFF3E0]-> PART : 管理分区
+RM -[#FFF3E0]-> DOP : 延迟操作
+RM -[#FFF3E0]-> LDFH : 故障处理
+
+' 日志管理层连接
+RM -[#FCE4EC]-> LM : 获取日志
+LM -[#FCE4EC]-> UL : 管理统一日志
+LM -[#FCE4EC]-> LC : 日志清理
+LC -[#FCE4EC]-> LCM : 清理管理
+
+' 存储层连接
+UL -[#F3E5F5]-> LS : 管理日志段
+LS -[#F3E5F5]-> OI : 偏移量索引
+LS -[#F3E5F5]-> TI : 时间索引
+LS -[#F3E5F5]-> TXI : 事务索引
+LS -[#F3E5F5]-> FR : 文件记录
+
+' 协调器层连接
+KAPI -[#E0F2F1]-> GC : 消费者组协调
+KAPI -[#E0F2F1]-> TC : 事务协调
+KAPI -[#E0F2F1]-> SC : 共享协调
+
+' 安全层连接
+AH -[#FFF8E1]-> AUTH : 授权检查
+SS -[#FFF8E1]-> CP : 凭证提供
+CP -[#FFF8E1]-> DTC : 委托令牌
+
+' 监控层连接
+RM -[#FFEBEE]-> BTS : 主题统计
+KAPI -[#FFEBEE]-> KMG : 指标收集
+KAPI -[#FFEBEE]-> QM : 配额管理
+
+' 数据流向
+note as DataFlow
+    <b>请求处理流程：</b>
+    1. 客户端连接 → Acceptor → Processor
+    2. 请求解析 → RequestChannel → KafkaApis
+    3. 业务处理 → ReplicaManager → LogManager
+    4. 数据存储 → UnifiedLog → LogSegment
+    5. 响应返回 → RequestChannel → Processor
+end note
+
+note as ComponentDetails
+    <b>核心组件说明：</b>
+    
+    <b>网络层：</b>
+    • SocketServer：网络服务器主入口
+    • Acceptor：接受新连接（每个监听器一个线程）
+    • Processor：处理 I/O 操作（多个线程）
+    • RequestChannel：请求-响应通道
+    
+    <b>请求处理层：</b>
+    • KafkaApis：所有 API 请求的统一处理入口
+    • KafkaRequestHandlerPool：请求处理线程池
+    • AuthHelper：权限验证辅助类
+    
+    <b>副本管理层：</b>
+    • ReplicaManager：分区副本管理核心
+    • Partition：单个分区的抽象
+    • DelayedOperationPurgatory：延迟操作管理
+    
+    <b>日志管理层：</b>
+    • LogManager：日志管理器，所有日志的入口
+    • UnifiedLog：单个分区的日志实现
+    • LogCleaner：日志清理和压缩
+    
+    <b>存储层：</b>
+    • LogSegment：日志段，日志的基本存储单元
+    • OffsetIndex：偏移量索引，快速定位消息
+    • TimeIndex：时间索引，基于时间查找
+    • FileRecords：底层文件存储
+end note
+
+note as PerformanceFeatures
+    <b>性能特性：</b>
+    
+    <b>网络层优化：</b>
+    • NIO 非阻塞 I/O
+    • 多线程并发处理
+    • 连接复用和配额管理
+    
+    <b>存储优化：</b>
+    • 顺序写入，随机读取
+    • 零拷贝技术
+    • 批量操作
+    • 索引加速查找
+    
+    <b>内存管理：</b>
+    • 页缓存利用
+    • 内存映射文件
+    • 对象池复用
+    
+    <b>并发控制：</b>
+    • 分区级别锁
+    • 无锁数据结构
+    • 异步处理
+end note
+
+' 源码位置标注
+note top of SS
+    <b>源码位置：</b>
+    core/src/main/scala/kafka/network/SocketServer.scala
+    
+    <b>关键方法：</b>
+    • startup(): 启动网络服务
+    • createDataPlaneAcceptor(): 创建数据平面接受器
+    • startProcessingRequests(): 开始处理请求
+end note
+
+note top of KAPI
+    <b>源码位置：</b>
+    core/src/main/scala/kafka/server/KafkaApis.scala
+    
+    <b>关键方法：</b>
+    • handle(): 请求分发入口
+    • handleProduceRequest(): 处理生产请求
+    • handleFetchRequest(): 处理消费请求
+end note
+
+note top of RM
+    <b>源码位置：</b>
+    core/src/main/scala/kafka/server/ReplicaManager.scala
+    
+    <b>关键方法：</b>
+    • appendRecords(): 追加记录
+    • fetchMessages(): 获取消息
+    • becomeLeaderOrFollower(): 角色转换
+end note
+
+note top of LM
+    <b>源码位置：</b>
+    core/src/main/scala/kafka/log/LogManager.scala
+    
+    <b>关键方法：</b>
+    • getOrCreateLog(): 获取或创建日志
+    • cleanupLogs(): 清理日志
+    • startup(): 启动日志管理器
+end note
+
+note top of LS
+    <b>源码位置：</b>
+    storage/src/main/java/org/apache/kafka/storage/internals/log/LogSegment.java
+    
+    <b>关键方法：</b>
+    • append(): 追加消息
+    • read(): 读取消息
+    • shouldRoll(): 判断是否需要滚动
+end note
+
+@enduml

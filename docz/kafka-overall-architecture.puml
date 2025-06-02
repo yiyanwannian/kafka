@@ -1,0 +1,164 @@
+@startuml Kafka 整体架构图
+
+!define LIGHTBLUE #E1F5FE
+!define LIGHTGREEN #E8F5E8
+!define LIGHTYELLOW #FFF9C4
+!define LIGHTPINK #FCE4EC
+!define LIGHTGRAY #F5F5F5
+!define LIGHTCYAN #E0F7FA
+
+title Apache Kafka 整体架构图
+
+skinparam componentStyle rectangle
+skinparam backgroundColor white
+
+' 客户端层
+package "客户端层" as ClientLayer LIGHTBLUE {
+   component [Producer API\n 发布消息到主题] as Producer
+   component [Consumer API\n 订阅和消费消息] as Consumer
+   component [Streams API\n 流处理和转换] as Streams
+   component [Connect API\n 数据集成连接器] as Connect
+   component [Admin API\n 集群管理和监控] as Admin
+}
+
+' 协议层
+package "协议层" as ProtocolLayer LIGHTCYAN {
+    component [Kafka Protocol\n TCP 协议] as Protocol
+}
+
+' Kafka 集群
+package "Kafka 集群" as KafkaCluster LIGHTGREEN {
+  
+  package "Broker 1" as Broker1 LIGHTYELLOW {
+    component [SocketServer\n **功能**: 网络 I/O 处理 \n **线程模型**: 1 Acceptor + N Processor + M Handler] as SS1
+    component [KafkaApis\n **功能**: 请求路由和处理] as API1
+    component [ReplicaManager\n **功能**: 副本管理和同步] as RM1
+    component [LogManager\n **功能**: 日志存储管理] as LM1
+    storage [Topic A\nPartition 0\n(Leader)\n **角色**: Leader 副本] as TP_A0_1
+    storage [Topic B\nPartition 1\n(Follower)\n **角色**: Follower 副本] as TP_B1_1
+    
+'    storage "Topic A\nPartition 0\n(Leader)" as TP_A0_1
+'    storage "Topic B\nPartition 1\n(Follower)" as TP_B1_1
+  }
+  
+  package "Broker 2" as Broker2 LIGHTYELLOW {
+    component SocketServer as SS2
+    component KafkaApis as API2
+    component ReplicaManager as RM2
+    component LogManager as LM2
+    
+    storage "Topic A\nPartition 1\n(Leader)" as TP_A1_2
+    storage "Topic B\nPartition 0\n(Follower)" as TP_B0_2
+  }
+  
+  package "Broker 3" as Broker3 LIGHTYELLOW {
+    component "SocketServer" as SS3
+    component "KafkaApis" as API3
+    component "ReplicaManager" as RM3
+    component "LogManager" as LM3
+    
+    storage "Topic B\nPartition 0\n(Leader)" as TP_B0_3
+    storage "Topic A\nPartition 0\n(Follower)" as TP_A0_3
+  }
+}
+
+' 元数据管理层
+package "元数据管理层" as MetadataLayer LIGHTPINK {
+  
+  package "KRaft 模式 (推荐)" as KRaftMode {
+
+    component [Controller 1\n **角色**: Leader Controller \n **功能**: 元数据管理、分区分配] as Controller1
+    component [Controller 2\n **角色**: Follower Controller \n **功能**: 元数据备份] as Controller2
+    component [Controller 3\n **角色**: Follower Controller \n **功能**: 元数据备份] as Controller3
+    component [KRaft Consensus\n **协议**: Raft 共识算法] as KRaft
+
+  }
+  
+  package "传统模式" as ZKMode {
+    component [Zookeeper Cluster\n **功能**: 元数据存储和协调 \n **协议**: Zab 共识算法 \n **状态**: 逐步淘汰] as ZK
+  }
+}
+
+' 连接关系
+Producer --> Protocol : 发送消息
+Consumer --> Protocol : 拉取消息
+Streams --> Protocol : 流处理
+Connect --> Protocol : 数据集成
+Admin --> Protocol : 管理操作
+
+Protocol --> SS1 : 网络请求
+Protocol --> SS2 : 网络请求
+Protocol --> SS3 : 网络请求
+
+SS1 --> API1 : 请求处理
+SS2 --> API2 : 请求处理
+SS3 --> API3 : 请求处理
+
+API1 --> RM1 : 副本操作
+API2 --> RM2 : 副本操作
+API3 --> RM3 : 副本操作
+
+RM1 --> LM1 : 日志操作
+RM2 --> LM2 : 日志操作
+RM3 --> LM3 : 日志操作
+
+LM1 --> TP_A0_1 : 存储
+LM1 --> TP_B1_1 : 存储
+LM2 --> TP_A1_2 : 存储
+LM2 --> TP_B0_2 : 存储
+LM3 --> TP_B0_3 : 存储
+LM3 --> TP_A0_3 : 存储
+
+' 副本同步
+TP_A0_1 <--> TP_A0_3 : 副本同步
+TP_A1_2 <--> TP_A0_1 : 副本同步
+TP_B0_3 <--> TP_B0_2 : 副本同步
+TP_B1_1 <--> TP_B0_3 : 副本同步
+
+' 元数据管理
+Controller1 --> Broker1 : 元数据更新
+Controller1 --> Broker2 : 元数据更新
+Controller1 --> Broker3 : 元数据更新
+
+Controller1 <--> Controller2 : KRaft 同步
+Controller1 <--> Controller3 : KRaft 同步
+Controller2 <--> Controller3 : KRaft 同步
+
+KRaft --> Controller1 : 共识协议
+KRaft --> Controller2 : 共识协议
+KRaft --> Controller3 : 共识协议
+
+' 注释
+'note top of ClientLayer
+'  **客户端特性**:
+'  - 线程安全
+'  - 自动重试
+'  - 负载均衡
+'  - 故障转移
+'end note
+
+'note right of KafkaCluster
+'  **集群特性**:
+'  - 水平扩展
+'  - 高可用性
+'  - 数据分区
+'  - 副本容错
+'end note
+'
+'note bottom of MetadataLayer
+'  **元数据管理**:
+'  - 集群配置
+'  - 主题分区信息
+'  - 副本分配
+'  - 消费者组状态
+'end note
+'
+'note left of Protocol
+'  **协议特性**:
+'  - 高效二进制格式
+'  - 向后兼容
+'  - 批量处理
+'  - 压缩支持
+'end note
+
+@enduml

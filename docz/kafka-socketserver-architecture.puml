@@ -1,0 +1,266 @@
+@startuml Kafka SocketServer 和 RequestChannel 架构图（含源码位置）
+
+!define LIGHTBLUE #E1F5FE
+!define LIGHTGREEN #E8F5E8
+!define LIGHTYELLOW #FFF9C4
+!define LIGHTPINK #FCE4EC
+!define LIGHTGRAY #F5F5F5
+
+title Kafka SocketServer 和 RequestChannel 架构图（含源码位置）
+
+note top
+  **源码路径映射**:
+  - SocketServer: core/src/main/scala/kafka/network/SocketServer.scala
+  - RequestChannel: core/src/main/scala/kafka/network/RequestChannel.scala
+  - KafkaApis: core/src/main/scala/kafka/server/KafkaApis.scala
+  - KafkaRequestHandler: core/src/main/scala/kafka/server/KafkaRequestHandler.scala
+  - KafkaRequestHandlerPool: core/src/main/scala/kafka/server/KafkaRequestHandlerPool.scala
+end note
+
+package "客户端层" as ClientLayer LIGHTBLUE {
+  [Kafka Producer] as Producer
+  [Kafka Consumer] as Consumer
+  [Kafka Admin] as Admin
+}
+
+package "网络层 (SocketServer)" as NetworkLayer LIGHTGREEN {
+
+  package "Acceptor 线程池" as AcceptorPool LIGHTYELLOW {
+    component "Data Plane Acceptor" as DataAcceptor {
+      **源码位置**: SocketServer.scala
+      **类定义**: 389-482行
+      **主循环**: 604-623行
+      **连接接受**: 625-695行
+      **动态配置**: 463-474行
+    }
+    component "Control Plane Acceptor" as ControlAcceptor {
+      **源码位置**: SocketServer.scala
+      **抽象类**: 487-799行
+      **线程运行**: 604-623行
+    }
+  }
+
+  package "Processor 线程池" as ProcessorPool LIGHTPINK {
+    component "Processor-0" as P0 {
+      **源码位置**: SocketServer.scala
+      **类定义**: 829-1295行
+      **主循环**: 919-946行
+      **请求处理**: 1032-1084行
+      **响应处理**: 963-1001行
+      **连接管理**: 1166-1207行
+    }
+    component "Processor-1" as P1 {
+      **同 Processor-0**
+    }
+    component "Processor-N" as PN {
+      **同 Processor-0**
+    }
+  }
+
+  component "Connection Quotas" as ConnQuotas {
+    **源码位置**: SocketServer.scala
+    **字段定义**: 102行
+    **配额检查**: 连接建立时调用
+  }
+  component "Network Metrics" as NetworkMetrics {
+    **源码位置**: SocketServer.scala
+    **指标收集**: 分布在各个组件中
+  }
+}
+
+package "请求通道层 (RequestChannel)" as ChannelLayer LIGHTGRAY {
+
+  component "RequestChannel" as RC {
+    **源码位置**: RequestChannel.scala
+    **类定义**: 342-502行
+    **请求接收**: 460-475行
+    **响应发送**: 389-454行
+    **处理器管理**: addProcessor/removeProcessor
+  }
+
+  component "Request Queue" as ReqQueue {
+    **源码位置**: RequestChannel.scala
+    **字段定义**: 349行 (requestQueue)
+    **类型**: ArrayBlockingQueue[BaseRequest]
+    **入队**: sendRequest() 375-377行
+    **出队**: receiveRequest() 460-475行
+  }
+
+  component "Callback Queue" as CallbackQueue {
+    **源码位置**: RequestChannel.scala
+    **字段定义**: 353行 (callbackQueue)
+    **类型**: ArrayBlockingQueue[BaseRequest]
+    **优先处理**: receiveRequest() 中优先检查
+  }
+
+  component "Processors Map" as ProcessorMap {
+    **源码位置**: RequestChannel.scala
+    **字段定义**: 351行 (processors)
+    **类型**: ConcurrentHashMap[Int, Processor]
+    **响应路由**: sendResponse() 416-454行
+  }
+
+  component "Request Metrics" as ReqMetrics {
+    **源码位置**: RequestChannel.scala
+    **类定义**: RequestChannelMetrics
+    **指标更新**: updateRequestMetrics()
+    **监控项**: 队列大小、处理延迟等
+  }
+
+  package "请求类型" as RequestTypes {
+    component "Request" as Req {
+      **源码位置**: RequestChannel.scala
+      **类定义**: 65-297行
+      **时间戳**: 74-80行 (性能监控)
+      **指标更新**: 201-271行
+    }
+    component "CallbackRequest" as CallbackReq {
+      **源码位置**: RequestChannel.scala
+      **用途**: 异步回调处理
+    }
+    component "ShutdownRequest" as ShutdownReq {
+      **源码位置**: RequestChannel.scala
+      **用途**: 优雅关闭信号
+    }
+    component "WakeupRequest" as WakeupReq {
+      **源码位置**: RequestChannel.scala
+      **用途**: 唤醒处理线程
+    }
+  }
+
+  package "响应类型" as ResponseTypes {
+    component "SendResponse" as SendResp {
+      **源码位置**: RequestChannel.scala
+      **类定义**: 309-319行
+      **用途**: 正常响应发送
+    }
+    component "NoOpResponse" as NoOpResp {
+      **源码位置**: RequestChannel.scala
+      **类定义**: 321-324行
+      **用途**: 无操作响应
+    }
+    component "CloseConnectionResponse" as CloseResp {
+      **源码位置**: RequestChannel.scala
+      **类定义**: 326-329行
+      **用途**: 关闭连接响应
+    }
+    component "StartThrottlingResponse" as StartThrottleResp {
+      **源码位置**: RequestChannel.scala
+      **用途**: 开始限流通知
+    }
+    component "EndThrottlingResponse" as EndThrottleResp {
+      **源码位置**: RequestChannel.scala
+      **用途**: 结束限流通知
+    }
+  }
+}
+
+package "业务处理层" as BusinessLayer LIGHTBLUE {
+  component "KafkaRequestHandler" as Handler {
+    **源码位置**: core/src/main/scala/kafka/server/KafkaRequestHandler.scala
+    **主循环**: run() 方法
+    **请求处理**: 从 RequestChannel 取出请求
+    **业务委托**: 委托给 KafkaApis 处理
+  }
+
+  component "KafkaApis" as APIs {
+    **源码位置**: core/src/main/scala/kafka/server/KafkaApis.scala
+    **请求路由**: handle() 方法
+    **API处理**: handleProduce, handleFetch 等
+    **响应生成**: 构建响应并发送到 RequestChannel
+  }
+
+  component "Request Handler Pool" as HandlerPool {
+    **源码位置**: core/src/main/scala/kafka/server/KafkaRequestHandlerPool.scala
+    **线程池**: 管理多个 KafkaRequestHandler 线程
+    **配置**: num.io.threads 参数控制线程数
+    **生命周期**: 启动、关闭线程池
+  }
+}
+
+' 连接关系
+Producer -down-> DataAcceptor : TCP 连接
+Consumer -down-> DataAcceptor : TCP 连接
+Admin -down-> ControlAcceptor : TCP 连接
+
+DataAcceptor -down-> P0 : 分发连接
+DataAcceptor -down-> P1 : 分发连接
+DataAcceptor -down-> PN : 分发连接
+
+ControlAcceptor -down-> P0 : 分发连接
+
+P0 -down-> ReqQueue : 发送请求
+P1 -down-> ReqQueue : 发送请求
+PN -down-> ReqQueue : 发送请求
+
+ReqQueue -down-> HandlerPool : 取出请求
+HandlerPool -down-> APIs : 处理请求
+APIs -down-> Handler : 业务逻辑
+
+Handler -up-> RC : 发送响应
+RC -up-> ProcessorMap : 路由响应
+ProcessorMap -up-> P0 : 响应队列
+ProcessorMap -up-> P1 : 响应队列
+ProcessorMap -up-> PN : 响应队列
+
+P0 -up-> Producer : 发送响应
+P1 -up-> Consumer : 发送响应
+PN -up-> Admin : 发送响应
+
+' 内部关系
+ConnQuotas -right-> DataAcceptor : 连接限制
+ConnQuotas -right-> ControlAcceptor : 连接限制
+
+NetworkMetrics -down-> RC : 监控数据
+ReqMetrics -up-> NetworkMetrics : 指标收集
+
+Req -up-> ReqQueue : 入队
+CallbackReq -up-> CallbackQueue : 入队
+ShutdownReq -up-> ReqQueue : 入队
+WakeupReq -up-> ReqQueue : 入队
+
+SendResp -down-> ProcessorMap : 路由
+NoOpResp -down-> ProcessorMap : 路由
+CloseResp -down-> ProcessorMap : 路由
+StartThrottleResp -down-> ProcessorMap : 路由
+EndThrottleResp -down-> ProcessorMap : 路由
+
+note right of DataAcceptor
+  **功能**: 每个监听器一个 Acceptor 线程，负责接受新连接
+  **实现**: SocketServer.scala 604-623行 run() 方法
+  **连接分发**: acceptNewConnections() 625-695行
+  **动态配置**: reconfigure() 463-474行
+end note
+
+note right of P0
+  **功能**: N 个 Processor 线程，每个都有自己的 Selector
+  **实现**: SocketServer.scala 919-946行 run() 主循环
+  **I/O处理**: processCompletedReceives() 1032-1084行
+  **响应处理**: processNewResponses() 963-1001行
+  **连接管理**: configureNewConnections() 1185-1207行
+end note
+
+note right of ReqQueue
+  **功能**: 阻塞队列，缓冲待处理请求
+  **实现**: RequestChannel.scala 349行 ArrayBlockingQueue
+  **入队**: sendRequest() 375-377行
+  **出队**: receiveRequest() 460-475行
+  **背压**: 队列满时阻塞 Processor 线程
+end note
+
+note right of HandlerPool
+  **功能**: M 个 Handler 线程，处理业务逻辑
+  **实现**: KafkaRequestHandlerPool.scala
+  **线程数**: num.io.threads 配置参数
+  **处理流程**: RequestChannel -> KafkaApis -> 业务逻辑
+end note
+
+note bottom of RC
+  **功能**: RequestChannel 是网络层和业务层的桥梁
+  **实现**: RequestChannel.scala 342-502行
+  **异步处理**: 生产者-消费者模式
+  **性能监控**: 详细的时间戳和指标收集
+  **线程安全**: ConcurrentHashMap 和 ArrayBlockingQueue
+end note
+
+@enduml

@@ -1,0 +1,213 @@
+@startuml API版本协商流程图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam participantBackgroundColor #F8F9FA
+skinparam participantBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+title Kafka API版本协商流程 - 基于源码分析
+
+participant "Kafka客户端" as Client
+participant "NetworkClient" as NC
+participant "Broker/Controller" as Server
+participant "ApiVersionManager" as AVM
+participant "MetadataCache" as MC
+participant "FeaturesPublisher" as FP
+
+== 1. 连接建立和版本发现阶段 ==
+
+Client ->> NC: 建立连接到Kafka集群
+activate NC
+
+note over NC
+    NetworkClient.initiateConnect()
+    准备发送ApiVersionsRequest
+end note
+
+NC ->> NC: 检查是否需要版本协商
+note right: discoverBrokerVersions = true
+
+NC ->> Server: 发送ApiVersionsRequest
+activate Server
+
+note over Server
+    ApiVersionsRequest包含:
+    - clientSoftwareName: "apache-kafka-java"
+    - clientSoftwareVersion: 当前版本
+    - 请求版本: 最高支持版本
+end note
+
+== 2. 服务器端版本响应阶段 ==
+
+Server ->> AVM: 处理ApiVersionsRequest
+activate AVM
+
+note over AVM
+    根据服务器类型选择实现:
+    - DefaultApiVersionManager (Broker)
+    - SimpleApiVersionManager (Controller)
+end note
+
+alt 如果是Broker节点
+    AVM ->> MC: 获取FinalizedFeatures
+    activate MC
+    MC ->> FP: 获取当前特性版本
+    activate FP
+    FP -->> MC: 返回FinalizedFeatures
+    deactivate FP
+    MC -->> AVM: 返回特性信息
+    deactivate MC
+    
+    AVM ->> AVM: 检查控制器API版本
+    note right: nodeApiVersionsSupplier.get()
+    
+    alt 如果有控制器版本信息
+        AVM ->> AVM: 生成controllerApiVersions
+        note right
+            ApiVersionsResponse.controllerApiVersions()
+            处理可转发的API
+        end note
+    else 没有控制器版本信息
+        AVM ->> AVM: 生成brokerApiVersions
+        note right
+            ApiVersionsResponse.brokerApiVersions()
+            只包含Broker API
+        end note
+    end
+    
+else 如果是Controller节点
+    AVM ->> FP: 直接获取特性版本
+    activate FP
+    FP -->> AVM: 返回FinalizedFeatures
+    deactivate FP
+    
+    AVM ->> AVM: 生成API版本集合
+    note right
+        使用预先计算的apiVersions
+        SimpleApiVersionManager.apiVersions
+    end note
+end
+
+AVM ->> AVM: 构建ApiVersionsResponse
+note right
+    包含:
+    - apiVersions: 支持的API版本
+    - supportedFeatures: 支持的特性
+    - finalizedFeatures: 确定的特性版本
+    - finalizedFeaturesEpoch: 特性版本纪元
+end note
+
+AVM -->> Server: 返回ApiVersionsResponse
+deactivate AVM
+
+Server -->> NC: 发送ApiVersionsResponse
+deactivate Server
+
+== 3. 客户端版本处理阶段 ==
+
+NC ->> NC: 处理ApiVersionsResponse
+note right: handleApiVersionsResponse()
+
+alt 如果响应包含错误
+    alt 错误类型为UNSUPPORTED_VERSION
+        NC ->> NC: 提取支持的ApiVersions版本
+        note right
+            从response.data().apiKeys()中
+            找到API_VERSIONS的maxVersion
+        end note
+        
+        NC ->> NC: 重新发送较低版本的请求
+        note right: 使用maxApiVersion重新构建请求
+    else 其他错误
+        NC ->> NC: 记录错误并返回
+    end
+else 响应成功
+    NC ->> NC: 创建NodeApiVersions
+    note right
+        new NodeApiVersions(
+            apiKeys,
+            supportedFeatures,
+            finalizedFeatures,
+            finalizedFeaturesEpoch
+        )
+    end note
+    
+    NC ->> NC: 更新本地API版本缓存
+    note right: apiVersions.update(node, nodeVersionInfo)
+    
+    NC ->> NC: 标记连接为就绪
+    note right: connectionStates.ready(node)
+    
+    NC ->> NC: 记录调试日志
+    note right
+        包含特性版本、支持的特性、
+        API版本等详细信息
+    end note
+end
+
+NC -->> Client: 连接建立完成
+deactivate NC
+
+== 4. 后续API请求版本选择 ==
+
+Client ->> NC: 发送业务请求 (如ProduceRequest)
+activate NC
+
+NC ->> NC: 获取节点版本信息
+note right: NodeApiVersions versionInfo = apiVersions.get(nodeId)
+
+alt 如果有版本信息
+    NC ->> NC: 选择兼容的API版本
+    note right
+        versionInfo.latestUsableVersion(
+            apiKey, 
+            builder.oldestAllowedVersion(),
+            builder.latestAllowedVersion()
+        )
+    end note
+else 没有版本信息
+    NC ->> NC: 使用最高允许版本
+    note right: builder.latestAllowedVersion()
+end
+
+NC ->> NC: 构建请求使用选定版本
+NC ->> Server: 发送带版本的请求
+Server -->> NC: 返回响应
+NC -->> Client: 返回处理结果
+deactivate NC
+
+== 5. API版本兼容性检查流程 ==
+
+note over Client, FP
+    <b>版本兼容性检查关键点:</b>
+    
+    1. <b>API范围检查:</b> apiKey.inScope(listenerType)
+    2. <b>版本启用检查:</b> apiKey.isVersionEnabled(version, enableUnstable)
+    3. <b>版本交集计算:</b> ApiVersionsResponse.intersect(v1, v2)
+    4. <b>转发API处理:</b> 区分可转发和不可转发的API
+    5. <b>特性版本验证:</b> 检查特性版本的兼容性
+    
+    <b>特殊处理:</b>
+    • API_VERSIONS请求总是被接受，即使版本不支持
+    • 遥测API根据配置动态启用/禁用
+    • PRODUCE API有特殊的版本响应处理 (librdkafka兼容性)
+end note
+
+== 6. 错误处理和重试机制 ==
+
+alt 版本协商失败
+    NC ->> NC: 记录错误信息
+    NC ->> NC: 尝试降级版本
+    
+    alt 如果是UNSUPPORTED_VERSION
+        NC ->> NC: 使用服务器建议的版本重试
+    else 其他致命错误
+        NC ->> Client: 抛出异常
+        note right: UnsupportedVersionException
+    end
+end
+
+@enduml

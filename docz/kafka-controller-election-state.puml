@@ -1,0 +1,167 @@
+@startuml Kafka Controller选举状态转换图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam stateBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+' 为不同状态设置不同的背景色
+skinparam state {
+    BackgroundColor<<initial>> #E8F5E8
+    BackgroundColor<<election>> #FFF3E0
+    BackgroundColor<<active>> #E3F2FD
+    BackgroundColor<<inactive>> #FCE4EC
+    BackgroundColor<<transition>> #F3E5F5
+}
+
+title Kafka Controller 选举状态转换图
+
+[*] --> Unattached : 节点启动
+
+state Unattached <<initial>> {
+    Unattached : <b>未连接状态</b>
+    Unattached : • 节点刚启动或失去连接
+    Unattached : • 等待选举超时或发现Leader
+    Unattached : • 可以给其他候选者投票
+}
+
+state Prospective <<election>> {
+    Prospective : <b>预候选状态</b>
+    Prospective : • 准备发起选举
+    Prospective : • 向其他节点发送预投票请求
+    Prospective : • 检查是否有足够支持成为候选者
+}
+
+state Candidate <<election>> {
+    Candidate : <b>候选者状态</b>
+    Candidate : • 正式发起选举
+    Candidate : • 增加任期号并为自己投票
+    Candidate : • 向其他节点请求投票
+    Candidate : • 等待选举结果
+}
+
+state Leader <<active>> {
+    Leader : <b>领导者状态</b>
+    Leader : • 处理所有写请求
+    Leader : • 向Follower发送心跳
+    Leader : • 管理日志复制
+    Leader : • 处理元数据变更
+}
+
+state Follower <<inactive>> {
+    Follower : <b>跟随者状态</b>
+    Follower : • 接收Leader的心跳和日志
+    Follower : • 响应Leader的请求
+    Follower : • 在选举超时后转为候选者
+}
+
+state Resigned <<transition>> {
+    Resigned : <b>辞职状态</b>
+    Resigned : • Leader主动辞职
+    Resigned : • 等待新Leader选出
+    Resigned : • 临时状态，快速转换
+}
+
+' 状态转换关系
+Unattached --> Prospective : 选举超时\nelectionTimeout
+Unattached --> Follower : 发现Leader\ndiscoverLeader(epoch)
+Unattached --> Unattached : 收到更高纪元\nhigherEpoch
+
+Prospective --> Candidate : 获得足够预投票\nsufficientPreVotes
+Prospective --> Unattached : 预投票失败\npreVoteRejected
+Prospective --> Follower : 发现Leader\ndiscoverLeader(epoch)
+
+Candidate --> Leader : 获得多数票\nmajorityVotes
+Candidate --> Prospective : 选举超时\nelectionTimeout
+Candidate --> Follower : 发现更高纪元Leader\ndiscoverLeader(higherEpoch)
+Candidate --> Unattached : 选举失败\nelectionFailed
+
+Leader --> Resigned : 主动辞职\nresignLeadership
+Leader --> Resigned : 失去多数派支持\nloseQuorum
+Leader --> Follower : 发现更高纪元\nhigherEpochDiscovered
+
+Follower --> Prospective : 心跳超时\nheartbeatTimeout
+Follower --> Follower : 收到心跳\nheartbeatReceived
+Follower --> Unattached : 连接丢失\nconnectionLost
+
+Resigned --> Unattached : 辞职超时\nresignationTimeout
+Resigned --> Follower : 发现新Leader\nnewLeaderElected
+
+' 特殊情况处理
+note top of Unattached
+    <b>启动条件：</b>
+    • 节点首次启动
+    • 网络分区恢复
+    • 配置变更后重启
+end note
+
+note right of Prospective
+    <b>预选举机制：</b>
+    • 避免不必要的任期增加
+    • 减少选举冲突
+    • 提高选举成功率
+end note
+
+note right of Candidate
+    <b>选举过程：</b>
+    • 任期号 +1
+    • 为自己投票
+    • 并行发送投票请求
+    • 等待多数派响应
+end note
+
+note top of Leader
+    <b>Leader职责：</b>
+    • 处理客户端写请求
+    • 维护集群元数据
+    • 管理Broker注册
+    • 执行分区重分配
+end note
+
+note left of Follower
+    <b>Follower行为：</b>
+    • 被动接收日志条目
+    • 响应Leader的请求
+    • 监控Leader健康状态
+    • 参与选举投票
+end note
+
+note bottom of Resigned
+    <b>辞职场景：</b>
+    • 优雅关闭
+    • 失去网络连接
+    • 检测到脑裂
+    • 配置变更要求
+end note
+
+' 关键参数说明
+note as ElectionParams
+    <b>关键选举参数：</b>
+    • <b>选举超时</b>：150-300ms（随机化）
+    • <b>心跳间隔</b>：50ms
+    • <b>最大选举轮数</b>：无限制
+    • <b>预投票启用</b>：默认开启
+
+    <b>故障检测：</b>
+    • <b>心跳超时</b>：3 * 心跳间隔
+    • <b>网络分区检测</b>：基于多数派原则
+    • <b>脑裂预防</b>：严格的任期号检查
+end note
+
+' 性能优化说明
+note as PerformanceOpt
+    <b>性能优化策略：</b>
+    • <b>批量处理</b>：批量发送投票请求
+    • <b>并行选举</b>：支持多个候选者同时选举
+    • <b>快速恢复</b>：优化的日志同步机制
+    • <b>负载均衡</b>：智能的Leader选择策略
+
+    <b>可靠性保证：</b>
+    • <b>持久化状态</b>：关键状态写入磁盘
+    • <b>幂等操作</b>：支持重复执行
+    • <b>一致性检查</b>：严格的状态验证
+end note
+
+@enduml

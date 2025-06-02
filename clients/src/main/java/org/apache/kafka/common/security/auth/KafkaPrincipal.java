@@ -40,6 +40,21 @@ import static java.util.Objects.requireNonNull;
  *    authorizer which is capable of using the additional group information.
  * </ol>
  */
+/**
+ * <p>Kafka 中的参与者（Principal）由类型和名称定义。对于默认启用的简单授权器，主体类型始终为 <code>"User"</code>，
+ * 但自定义授权器可以利用不同的主体类型（例如启用基于组或角色的 ACL）。当你需要根据认证上下文派生不同的主体类型，
+ * 或需要表示不同主体之间的关系时，可以使用 {@link KafkaPrincipalBuilder} 接口。例如，你可以扩展
+ * {@link KafkaPrincipal}，以将用户主体与一个或多个角色主体关联起来。
+ *
+ * <p>对于自定义扩展 {@link KafkaPrincipal}，有两点需要注意：
+ * <ol>
+ * <li>为了兼容 Kafka 提供的 ACL API（包括命令行工具），每个 ACL 只能表示授予单个主体（由主体类型和名称组成）的权限。
+ *    也可以实现更丰富的 ACL 语义，但你必须实现自己的添加和移除 ACL 的机制。
+ * <li>通常，{@link KafkaPrincipal} 的扩展只有在对应的 Authorizer 也了解该扩展时才有用。
+ *    如果你有一个 {@link KafkaPrincipalBuilder} 能从认证上下文（如 SSL 客户端证书）中派生用户组，
+ *    那么你需要一个能够使用额外组信息的自定义授权器。
+ * </ol>
+ */
 public class KafkaPrincipal implements Principal {
     public static final String USER_TYPE = "User";
     public static final KafkaPrincipal ANONYMOUS = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "ANONYMOUS");

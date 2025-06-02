@@ -1,0 +1,98 @@
+@startuml Kafka API Usage Flow
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+title Kafka API 使用流程图
+
+actor "Application Developer" as DEV
+participant "Producer API" as PROD
+participant "Consumer API" as CONS
+participant "Streams API" as STREAMS
+participant "Connect API" as CONNECT
+participant "Admin API" as ADMIN
+participant "Kafka Cluster" as KAFKA
+
+== Producer API 使用流程 ==
+DEV -> PROD : 创建Producer
+activate PROD
+PROD -> KAFKA : 连接集群
+KAFKA -> PROD : 返回元数据
+DEV -> PROD : send(record)
+PROD -> KAFKA : 发送消息
+KAFKA -> PROD : 确认/错误
+PROD -> DEV : Future<RecordMetadata>
+deactivate PROD
+
+== Consumer API 使用流程 ==
+DEV -> CONS : 创建Consumer
+activate CONS
+CONS -> KAFKA : 连接集群
+DEV -> CONS : subscribe(topics)
+CONS -> KAFKA : 加入消费者组
+KAFKA -> CONS : 分配分区
+loop 消费循环
+    DEV -> CONS : poll()
+    CONS -> KAFKA : 拉取消息
+    KAFKA -> CONS : 返回消息批次
+    CONS -> DEV : ConsumerRecords
+    DEV -> CONS : commitSync()
+    CONS -> KAFKA : 提交偏移量
+end
+deactivate CONS
+
+== Streams API 使用流程 ==
+DEV -> STREAMS : 创建StreamsBuilder
+activate STREAMS
+DEV -> STREAMS : 定义拓扑
+note right : 使用DSL或Processor API
+DEV -> STREAMS : 创建KafkaStreams
+STREAMS -> KAFKA : 连接集群
+DEV -> STREAMS : start()
+STREAMS -> KAFKA : 开始处理流
+loop 流处理
+    KAFKA -> STREAMS : 输入消息
+    STREAMS -> STREAMS : 处理转换
+    STREAMS -> KAFKA : 输出消息
+end
+deactivate STREAMS
+
+== Connect API 使用流程 ==
+DEV -> CONNECT : 实现Connector
+activate CONNECT
+note right : SourceConnector或SinkConnector
+DEV -> CONNECT : 配置连接器
+CONNECT -> KAFKA : 注册连接器
+loop 数据同步
+    alt Source Connector
+        CONNECT -> CONNECT : 从外部系统读取
+        CONNECT -> KAFKA : 写入Kafka
+    else Sink Connector
+        KAFKA -> CONNECT : 从Kafka读取
+        CONNECT -> CONNECT : 写入外部系统
+    end
+end
+deactivate CONNECT
+
+== Admin API 使用流程 ==
+DEV -> ADMIN : 创建AdminClient
+activate ADMIN
+ADMIN -> KAFKA : 连接集群
+DEV -> ADMIN : createTopics()
+ADMIN -> KAFKA : 创建主题请求
+KAFKA -> ADMIN : 创建结果
+ADMIN -> DEV : CreateTopicsResult
+DEV -> ADMIN : describeCluster()
+ADMIN -> KAFKA : 查询集群信息
+KAFKA -> ADMIN : 集群元数据
+ADMIN -> DEV : DescribeClusterResult
+deactivate ADMIN
+
+note over DEV, KAFKA
+  所有API都支持：
+  - 异步操作
+  - 配置管理
+  - 错误处理
+  - 监控指标
+end note
+
+@enduml

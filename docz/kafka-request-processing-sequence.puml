@@ -1,0 +1,151 @@
+@startuml Kafka 请求处理时序图
+
+!define LIGHTBLUE #E1F5FE
+!define LIGHTGREEN #E8F5E8
+!define LIGHTYELLOW #FFF9C4
+!define LIGHTPINK #FCE4EC
+
+title Kafka 请求处理完整时序图
+
+participant "Kafka Client" as Client LIGHTBLUE
+participant "Acceptor Thread" as Acceptor LIGHTGREEN
+participant "Processor Thread" as Processor LIGHTYELLOW
+participant "RequestChannel" as Channel LIGHTPINK
+participant "Request Handler" as Handler LIGHTBLUE
+participant "KafkaApis" as APIs LIGHTGREEN
+
+== 连接建立阶段 ==
+
+Client -> Acceptor : TCP 连接请求
+activate Acceptor
+
+Acceptor -> Acceptor : acceptNewConnections()
+note right : 在 NIO Selector 上注册 OP_ACCEPT
+
+Acceptor -> Processor : 分发新连接
+note right : 轮询选择 Processor
+
+activate Processor
+Processor -> Processor : configureNewConnections()
+note right : 配置新连接的 SocketChannel
+
+Acceptor -> Client : 连接建立成功
+deactivate Acceptor
+
+== 请求发送阶段 ==
+
+Client -> Processor : 发送请求数据
+note right : 通过 TCP Socket 发送
+
+Processor -> Processor : poll()
+note right : NIO Selector 轮询 I/O 事件
+
+Processor -> Processor : processCompletedReceives()
+note right : 处理完成的接收操作
+
+== 请求解析和入队阶段 ==
+
+Processor -> Processor : parseRequestHeader()
+note right : 解析请求头部信息
+
+Processor -> Processor : 创建 RequestContext
+note right : 包含连接信息、认证信息等
+
+Processor -> Channel : new Request(processor, context, ...)
+activate Channel
+note right : 创建 Request 对象\n包含时间戳、内存池等
+
+Processor -> Channel : sendRequest(request)
+note right : 将请求放入 requestQueue
+
+Channel -> Channel : requestQueue.put(request)
+note right : 阻塞队列，如果队列满则阻塞
+
+Processor -> Processor : selector.mute(connectionId)
+note right : 暂停该连接的读取，实现背压
+
+== 请求处理阶段 ==
+
+Handler -> Channel : receiveRequest()
+activate Handler
+note right : 从 requestQueue 取出请求
+
+Channel -> Handler : 返回 Request 对象
+note right : 设置 requestDequeueTimeNanos
+
+Handler -> Handler : 设置 requestDequeueTimeNanos
+note right : 记录请求出队时间
+
+Handler -> APIs : handle(request)
+activate APIs
+note right : 根据 API Key 路由到具体处理方法
+
+APIs -> APIs : 业务逻辑处理
+note right : 如 handleProduce、handleFetch 等
+
+APIs -> APIs : 设置 apiLocalCompleteTimeNanos
+note right : 记录本地处理完成时间
+
+== 响应生成阶段 ==
+
+APIs -> Channel : sendResponse(request, response)
+note right : 发送响应
+
+Channel -> Channel : new SendResponse(request, responseSend, ...)
+note right : 创建 SendResponse 对象
+
+Channel -> Channel : 设置 responseCompleteTimeNanos
+note right : 记录响应完成时间
+
+Channel -> Processor : enqueueResponse(response)
+note right : 将响应放入 Processor 的响应队列
+
+deactivate APIs
+deactivate Handler
+
+== 响应发送阶段 ==
+
+Processor -> Processor : processNewResponses()
+note right : 处理新的响应
+
+Processor -> Processor : dequeueResponse()
+note right : 从响应队列取出响应
+
+Processor -> Processor : 设置 responseDequeueTimeNanos
+note right : 记录响应出队时间
+
+Processor -> Processor : sendResponse(response, responseSend)
+note right : 注册写事件到 Selector
+
+Processor -> Processor : poll()
+note right : 轮询 I/O 事件
+
+Processor -> Processor : processCompletedSends()
+note right : 处理完成的发送操作
+
+Processor -> Client : 发送响应数据
+note right : 通过 TCP Socket 发送
+
+Processor -> Processor : selector.unmute(connectionId)
+note right : 恢复该连接的读取
+
+== 指标更新阶段 ==
+
+Processor -> Channel : updateRequestMetrics()
+note right : 更新请求处理指标
+
+Channel -> Channel : 计算各阶段耗时
+note right : requestQueueTime、apiLocalTime、\nresponseQueueTime 等
+
+Channel -> Channel : 更新 Metrics
+note right : 更新吞吐量、延迟等指标
+
+deactivate Channel
+deactivate Processor
+
+Client -> Client : 接收并处理响应
+note right : 客户端处理响应数据
+
+note over Client, APIs : 整个请求-响应周期完成\n包含详细的性能监控数据
+
+@enduml

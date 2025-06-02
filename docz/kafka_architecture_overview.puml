@@ -1,0 +1,224 @@
+@startuml Kafka Architecture Overview
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+title Apache Kafka 架构概览图
+
+package "Kafka Ecosystem" {
+    
+    package "Client Applications" {
+        [Producer App] as PROD_APP
+        [Consumer App] as CONS_APP  
+        [Streams App] as STREAM_APP
+        [Connect App] as CONNECT_APP
+    }
+    
+    package "Kafka Clients Library" {
+        package "Producer API" {
+            [KafkaProducer] as PRODUCER
+            [RecordAccumulator] as ACCUMULATOR
+            [Partitioner] as PARTITIONER
+        }
+        
+        package "Consumer API" {
+            [KafkaConsumer] as CONSUMER
+            [ConsumerCoordinator] as COORDINATOR
+            [Fetcher] as FETCHER
+        }
+        
+        package "Admin API" {
+            [AdminClient] as ADMIN
+        }
+        
+        package "Streams API" {
+            [KafkaStreams] as STREAMS
+            [StreamsBuilder] as BUILDER
+            [StateStore] as STORE
+        }
+    }
+    
+    package "Kafka Cluster" {
+        package "Broker 1" {
+            [SocketServer] as SS1
+            [KafkaApis] as API1
+            [ReplicaManager] as RM1
+            [LogManager] as LM1
+            [GroupCoordinator] as GC1
+            database "Partitions" as P1
+        }
+        
+        package "Broker 2" {
+            [SocketServer] as SS2
+            [KafkaApis] as API2
+            [ReplicaManager] as RM2
+            [LogManager] as LM2
+            [GroupCoordinator] as GC2
+            database "Partitions" as P2
+        }
+        
+        package "Broker 3" {
+            [SocketServer] as SS3
+            [KafkaApis] as API3
+            [ReplicaManager] as RM3
+            [LogManager] as LM3
+            [GroupCoordinator] as GC3
+            database "Partitions" as P3
+        }
+        
+        [Controller] as CONTROLLER
+        [MetadataCache] as METADATA
+    }
+    
+    package "External Systems" {
+        database "Source DB" as SRC_DB
+        database "Target DB" as TGT_DB
+        [Monitoring] as MONITOR
+        [Schema Registry] as SCHEMA
+    }
+}
+
+' Application connections
+PROD_APP --> PRODUCER : 发送消息
+CONS_APP --> CONSUMER : 消费消息
+STREAM_APP --> STREAMS : 流处理
+CONNECT_APP --> PRODUCER : 数据集成
+CONNECT_APP --> CONSUMER : 数据集成
+
+' Producer flow
+PRODUCER --> ACCUMULATOR : 批量累积
+ACCUMULATOR --> PARTITIONER : 分区选择
+PRODUCER --> SS1 : 网络请求
+PRODUCER --> SS2 : 网络请求
+PRODUCER --> SS3 : 网络请求
+
+' Consumer flow
+CONSUMER --> COORDINATOR : 组协调
+CONSUMER --> FETCHER : 数据拉取
+FETCHER --> SS1 : 拉取请求
+FETCHER --> SS2 : 拉取请求
+FETCHER --> SS3 : 拉取请求
+
+' Streams flow
+STREAMS --> BUILDER : 拓扑构建
+STREAMS --> STORE : 状态存储
+STREAMS --> PRODUCER : 内部生产者
+STREAMS --> CONSUMER : 内部消费者
+
+' Broker internal flow
+SS1 --> API1 : 请求处理
+API1 --> RM1 : 副本管理
+RM1 --> LM1 : 日志管理
+LM1 --> P1 : 存储访问
+API1 --> GC1 : 组协调
+
+SS2 --> API2 : 请求处理
+API2 --> RM2 : 副本管理
+RM2 --> LM2 : 日志管理
+LM2 --> P2 : 存储访问
+API2 --> GC2 : 组协调
+
+SS3 --> API3 : 请求处理
+API3 --> RM3 : 副本管理
+RM3 --> LM3 : 日志管理
+LM3 --> P3 : 存储访问
+API3 --> GC3 : 组协调
+
+' Cluster coordination
+CONTROLLER <--> SS1 : 元数据同步
+CONTROLLER <--> SS2 : 元数据同步
+CONTROLLER <--> SS3 : 元数据同步
+CONTROLLER --> METADATA : 元数据更新
+
+' Replication
+RM1 <--> RM2 : 副本同步
+RM2 <--> RM3 : 副本同步
+RM1 <--> RM3 : 副本同步
+
+' External integrations
+CONNECT_APP <--> SRC_DB : 数据源
+CONNECT_APP <--> TGT_DB : 数据目标
+ADMIN --> MONITOR : 监控指标
+PRODUCER --> SCHEMA : 模式验证
+CONSUMER --> SCHEMA : 模式验证
+
+note top of PRODUCER
+  **Producer 特性**:
+  - 异步批量发送
+  - 分区负载均衡
+  - 幂等性保证
+  - 事务支持
+  
+  **核心类**:
+  - KafkaProducer.java
+  - RecordAccumulator.java
+  - Sender.java
+end note
+
+note top of CONSUMER
+  **Consumer 特性**:
+  - 消费者组协调
+  - 自动重平衡
+  - 偏移量管理
+  - 容错恢复
+  
+  **核心类**:
+  - KafkaConsumer.java
+  - ConsumerCoordinator.java
+  - Fetcher.java
+end note
+
+note top of STREAMS
+  **Streams 特性**:
+  - 高级DSL API
+  - 状态管理
+  - 时间窗口
+  - 容错处理
+  
+  **核心类**:
+  - KafkaStreams.java
+  - StreamsBuilder.java
+  - StateStore接口
+end note
+
+note bottom of SS1
+  **Broker 特性**:
+  - 高吞吐量存储
+  - 副本机制
+  - 分区管理
+  - 网络优化
+  
+  **核心类**:
+  - SocketServer.scala
+  - KafkaApis.scala
+  - ReplicaManager.scala
+  - LogManager.scala
+end note
+
+note bottom of CONTROLLER
+  **Controller 职责**:
+  - 分区Leader选举
+  - 副本分配管理
+  - 主题创建删除
+  - 集群元数据管理
+  
+  **实现**:
+  - KRaft模式: QuorumController
+  - 传统模式: KafkaController
+end note
+
+note right of P1
+  **存储结构**:
+  
+  **Topic**: 逻辑概念
+  ├── Partition 0 (Leader: Broker1, ISR: [1,2])
+  ├── Partition 1 (Leader: Broker2, ISR: [2,3])  
+  └── Partition 2 (Leader: Broker3, ISR: [3,1])
+  
+  **Partition**: 物理存储
+  ├── 00000000000000000000.log
+  ├── 00000000000000000000.index
+  ├── 00000000000000000000.timeindex
+  └── leader-epoch-checkpoint
+end note
+
+@enduml

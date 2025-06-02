@@ -1,0 +1,342 @@
+@startuml Kafka Detailed Architecture with Code Locations
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam componentStyle rectangle
+
+title Apache Kafka 详细架构图 (含代码位置)
+
+package "Kafka Server (core/)" {
+    
+    package "Entry Point" {
+        component [Kafka.scala] as MAIN
+        note right of MAIN
+          **入口点**
+          core/src/main/scala/kafka/Kafka.scala
+          - main() 方法
+          - buildServer() 创建服务器
+        end note
+    }
+    
+    package "Server Implementation" {
+        component [KafkaRaftServer] as KRS
+        component [BrokerServer] as BS
+        component [ControllerServer] as CS
+        
+        note right of KRS
+          **KRaft服务器**
+          core/src/main/scala/kafka/server/KafkaRaftServer.scala
+          - 新架构入口
+          - 管理Controller和Broker生命周期
+        end note
+        
+        note right of BS
+          **Broker服务器**
+          core/src/main/scala/kafka/server/BrokerServer.scala
+          - KRaft模式的Broker实现
+          - 继承KafkaBroker接口
+        end note
+        
+        note right of CS
+          **Controller服务器**
+          core/src/main/scala/kafka/server/ControllerServer.scala
+          - KRaft模式的Controller实现
+          - 元数据管理
+        end note
+    }
+    
+    package "Network Layer (core/src/main/scala/kafka/network/)" {
+        component [SocketServer] as SS
+        component [Acceptor] as ACC
+        component [Processor] as PROC
+        component [RequestChannel] as RC
+        
+        note right of SS
+          **网络服务器**
+          core/src/main/scala/kafka/network/SocketServer.scala
+          - 处理客户端连接
+          - 管理Acceptor和Processor线程
+        end note
+        
+        note right of ACC
+          **连接接受器**
+          SocketServer.scala (内部类)
+          - 单线程处理新连接
+          - 分配连接给Processor
+        end note
+        
+        note right of PROC
+          **请求处理器**
+          SocketServer.scala (内部类)
+          - 多线程处理I/O
+          - 读取请求，写入响应
+        end note
+    }
+    
+    package "Request Processing (core/src/main/scala/kafka/server/)" {
+        component [KafkaApis] as APIS
+        component [KafkaRequestHandlerPool] as KRHP
+        component [KafkaRequestHandler] as KRH
+        
+        note right of APIS
+          **API处理器**
+          core/src/main/scala/kafka/server/KafkaApis.scala
+          - 处理所有API请求
+          - 路由到相应的处理逻辑
+        end note
+        
+        note right of KRHP
+          **请求处理线程池**
+          core/src/main/scala/kafka/server/KafkaRequestHandlerPool.scala
+          - 管理Handler线程
+        end note
+    }
+    
+    package "Storage Layer (core/src/main/scala/kafka/log/)" {
+        component [LogManager] as LM
+        component [UnifiedLog] as UL
+        component [LogSegment] as LS
+        component [ReplicaManager] as RM
+        
+        note right of LM
+          **日志管理器**
+          core/src/main/scala/kafka/log/LogManager.scala
+          - 管理所有主题分区的日志
+          - 日志清理和压缩
+        end note
+        
+        note right of UL
+          **统一日志**
+          core/src/main/scala/kafka/log/UnifiedLog.scala
+          - 单个分区的日志实现
+          - 包含多个LogSegment
+        end note
+        
+        note right of RM
+          **副本管理器**
+          core/src/main/scala/kafka/server/ReplicaManager.scala
+          - 管理分区副本
+          - 处理生产和消费请求
+        end note
+    }
+    
+    package "Coordination (core/src/main/scala/kafka/coordinator/)" {
+        component [GroupCoordinator] as GC
+        component [TransactionCoordinator] as TC
+        component [ShareCoordinator] as SC
+        
+        note right of GC
+          **消费者组协调器**
+          org.apache.kafka.coordinator.group.GroupCoordinator
+          - 管理消费者组
+          - 处理重平衡
+        end note
+        
+        note right of TC
+          **事务协调器**
+          core/src/main/scala/kafka/coordinator/transaction/TransactionCoordinator.scala
+          - 管理事务状态
+          - 保证exactly-once语义
+        end note
+    }
+    
+    package "KRaft Implementation (raft/)" {
+        component [KafkaRaftClient] as KRC
+        component [RaftManager] as RAFTM
+        component [QuorumController] as QC
+        
+        note right of KRC
+          **Raft客户端**
+          raft/src/main/java/org/apache/kafka/raft/KafkaRaftClient.java
+          - Raft协议实现
+          - 替代Zookeeper
+        end note
+        
+        note right of RAFTM
+          **Raft管理器**
+          core/src/main/scala/kafka/raft/RaftManager.scala
+          - 管理Raft客户端
+          - 处理元数据复制
+        end note
+    }
+}
+
+package "Client APIs (clients/)" {
+    
+    package "Producer API (clients/src/main/java/org/apache/kafka/clients/producer/)" {
+        component [KafkaProducer] as KPROD
+        component [ProducerInterceptors] as PI
+        component [RecordAccumulator] as RA
+        
+        note right of KPROD
+          **Kafka生产者**
+          clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java
+          - 主要的生产者API
+          - 异步发送消息
+        end note
+    }
+    
+    package "Consumer API (clients/src/main/java/org/apache/kafka/clients/consumer/)" {
+        component [KafkaConsumer] as KCONS
+        component [ClassicKafkaConsumer] as CKC
+        component [AsyncKafkaConsumer] as AKC
+        component [ConsumerDelegateCreator] as CDC
+        
+        note right of KCONS
+          **Kafka消费者**
+          clients/src/main/java/org/apache/kafka/clients/consumer/KafkaConsumer.java
+          - 主要的消费者API
+          - 委托给具体实现
+        end note
+        
+        note right of CKC
+          **经典消费者**
+          clients/src/main/java/org/apache/kafka/clients/consumer/internals/ClassicKafkaConsumer.java
+          - 传统消费者组协议
+          - 向后兼容
+        end note
+        
+        note right of AKC
+          **异步消费者**
+          clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java
+          - 新的消费者组协议
+          - KIP-848实现
+        end note
+    }
+    
+    package "Admin API (clients/src/main/java/org/apache/kafka/clients/admin/)" {
+        component [Admin] as ADMIN_IF
+        component [KafkaAdminClient] as KAC
+        
+        note right of ADMIN_IF
+          **管理接口**
+          clients/src/main/java/org/apache/kafka/clients/admin/Admin.java
+          - 管理API接口定义
+          - 主题、配置、ACL管理
+        end note
+        
+        note right of KAC
+          **管理客户端实现**
+          clients/src/main/java/org/apache/kafka/clients/admin/KafkaAdminClient.java
+          - Admin接口的具体实现
+        end note
+    }
+}
+
+package "Kafka Streams (streams/)" {
+    component [KafkaStreams] as KS
+    component [StreamsBuilder] as SB
+    component [KafkaClientSupplier] as KCS
+    component [DefaultKafkaClientSupplier] as DKCS
+    
+    note right of KS
+      **Kafka Streams主类**
+      streams/src/main/java/org/apache/kafka/streams/KafkaStreams.java
+      - 流处理应用入口
+      - 管理流处理拓扑
+    end note
+    
+    note right of SB
+      **流构建器**
+      streams/src/main/java/org/apache/kafka/streams/StreamsBuilder.java
+      - DSL API入口
+      - 构建处理拓扑
+    end note
+    
+    note right of DKCS
+      **默认客户端供应商**
+      streams/src/main/java/org/apache/kafka/streams/processor/internals/DefaultKafkaClientSupplier.java
+      - 创建Producer/Consumer/Admin客户端
+    end note
+}
+
+package "Kafka Connect (connect/)" {
+    component [Connector] as CONN
+    component [SourceConnector] as SCONN
+    component [SinkConnector] as SICONN
+    component [ConnectRestExtension] as CRE
+    
+    note right of CONN
+      **连接器基类**
+      connect/api/src/main/java/org/apache/kafka/connect/connector/Connector.java
+      - 连接器抽象基类
+      - 定义连接器生命周期
+    end note
+    
+    note right of SCONN
+      **源连接器**
+      connect/api/src/main/java/org/apache/kafka/connect/source/SourceConnector.java
+      - 从外部系统导入数据
+    end note
+    
+    note right of SICONN
+      **汇连接器**
+      connect/api/src/main/java/org/apache/kafka/connect/sink/SinkConnector.java
+      - 导出数据到外部系统
+    end note
+}
+
+package "Tools (tools/)" {
+    component [ConsoleProducer] as CP
+    component [ConsoleConsumer] as CC
+    
+    note right of CP
+      **控制台生产者**
+      tools/src/main/java/org/apache/kafka/tools/ConsoleProducer.java
+      - 命令行生产者工具
+    end note
+    
+    note right of CC
+      **控制台消费者**
+      tools/src/main/java/org/apache/kafka/tools/ConsoleConsumer.java
+      - 命令行消费者工具
+    end note
+}
+
+' 连接关系
+MAIN --> KRS : 创建
+KRS --> BS : 管理
+KRS --> CS : 管理
+
+BS --> SS : 包含
+BS --> APIS : 包含
+BS --> RM : 包含
+BS --> LM : 包含
+BS --> GC : 包含
+BS --> TC : 包含
+
+SS --> ACC : 包含
+SS --> PROC : 包含
+SS --> RC : 使用
+
+PROC --> RC : 写入请求
+RC --> KRHP : 分发请求
+KRHP --> KRH : 包含
+KRH --> APIS : 调用
+
+APIS --> RM : 调用
+APIS --> GC : 调用
+APIS --> TC : 调用
+
+RM --> LM : 使用
+LM --> UL : 管理
+UL --> LS : 包含
+
+BS --> RAFTM : 使用
+RAFTM --> KRC : 包含
+CS --> QC : 包含
+
+' 客户端连接
+KPROD --> SS : 连接
+KCONS --> SS : 连接
+ADMIN_IF --> SS : 连接
+
+KCONS --> CDC : 使用
+CDC --> CKC : 创建
+CDC --> AKC : 创建
+
+KS --> DKCS : 使用
+DKCS --> KPROD : 创建
+DKCS --> KCONS : 创建
+DKCS --> ADMIN_IF : 创建
+
+@enduml

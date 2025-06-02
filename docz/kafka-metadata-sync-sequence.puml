@@ -1,0 +1,172 @@
+@startuml Kafka元数据同步时序图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam participantBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+title Kafka 元数据同步流程时序图
+
+autonumber
+
+participant "客户端" as Client
+participant "Controller\n(Leader)" as Controller
+participant "KafkaRaftClient" as RaftClient
+participant "MetadataLoader" as Loader
+participant "MetadataPublisher" as Publisher
+participant "Broker\n(Follower)" as Broker
+participant "KRaftMetadataCache" as Cache
+
+== 1. 元数据变更请求 ==
+
+Client -> Controller: 创建主题请求\nCreateTopicsRequest
+activate Controller
+
+Controller -> Controller: 验证请求合法性
+note right: 检查主题名称、分区数、副本因子等
+
+Controller -> Controller: 生成元数据记录
+note right
+    创建 TopicRecord 和 PartitionRecord
+    分配主题ID和分区副本
+end note
+
+Controller -> RaftClient: scheduleAppend(records)
+activate RaftClient
+note right: 将元数据记录写入 Raft 日志
+
+== 2. Raft 共识过程 ==
+
+RaftClient -> RaftClient: 写入本地日志
+RaftClient -> Broker: 复制日志到 Follower
+activate Broker
+
+Broker -> Broker: 写入本地日志
+Broker -> RaftClient: 确认写入成功
+deactivate Broker
+
+RaftClient -> RaftClient: 达到多数派确认
+RaftClient -> Controller: 通知日志已提交
+deactivate RaftClient
+
+== 3. 元数据状态应用 ==
+
+Controller -> Controller: handleCommittedRecords()
+note right
+    创建 MetadataDelta
+    重放提交的记录
+    生成新的 MetadataImage
+end note
+
+Controller -> Loader: 通知元数据变更
+activate Loader
+
+Loader -> Loader: 创建 MetadataDelta
+note right: 基于当前 MetadataImage 创建增量
+
+Loader -> Loader: 重放元数据记录
+note right
+    delta.replay(TopicRecord)
+    delta.replay(PartitionRecord)
+end note
+
+Loader -> Loader: 应用增量变更
+note right
+    newImage = delta.apply(provenance)
+    原子性更新元数据镜像
+end note
+
+== 4. 元数据发布广播 ==
+
+Loader -> Publisher: onMetadataUpdate(delta, newImage, manifest)
+activate Publisher
+
+par 并行通知各个发布器
+    Publisher -> Cache: KRaftMetadataCachePublisher
+    activate Cache
+    Cache -> Cache: setImage(newImage)
+    note right: 原子性更新缓存中的元数据镜像
+    deactivate Cache
+
+    Publisher -> Publisher: FeaturesPublisher
+    note right: 更新特性版本信息
+
+    Publisher -> Publisher: BrokerMetadataPublisher
+    note right
+        处理主题变更
+        更新分区状态
+        通知相关组件
+    end note
+
+    Publisher -> Publisher: DynamicConfigPublisher
+    note right: 处理配置变更
+end
+
+deactivate Publisher
+deactivate Loader
+
+== 5. Broker 端元数据同步 ==
+
+note over Broker
+    Broker 作为 Raft Follower
+    也会接收到相同的元数据记录
+end note
+
+Broker -> Broker: 处理 Raft 日志
+Broker -> Loader: 本地 MetadataLoader 处理
+activate Loader
+
+Loader -> Loader: 应用相同的元数据变更
+Loader -> Publisher: 通知本地发布器
+activate Publisher
+
+Publisher -> Cache: 更新本地元数据缓存
+activate Cache
+Cache -> Cache: setImage(newImage)
+deactivate Cache
+
+deactivate Publisher
+deactivate Loader
+
+== 6. 客户端查询验证 ==
+
+Controller -> Client: CreateTopicsResponse
+note right: 返回创建成功响应
+deactivate Controller
+
+Client -> Broker: MetadataRequest
+note right: 查询主题元数据
+
+activate Broker
+Broker -> Cache: 查询主题信息
+activate Cache
+Cache -> Cache: 从 MetadataImage 获取数据
+Cache -> Broker: 返回主题元数据
+deactivate Cache
+
+Broker -> Client: MetadataResponse
+note right: 返回最新的主题元数据
+deactivate Broker
+
+== 关键特性说明 ==
+
+note over Controller, Cache
+    <b>一致性保证：</b>
+    • Raft 协议确保强一致性
+    • 原子性的元数据镜像更新
+    • 版本追踪防止数据回退
+
+    <b>性能优化：</b>
+    • 不可变数据结构支持无锁读取
+    • 增量更新减少内存拷贝
+    • 并行发布器提高处理效率
+
+    <b>故障恢复：</b>
+    • 快照机制支持快速恢复
+    • 日志重放确保数据完整性
+    • 自动故障检测和选举
+end note
+
+@enduml

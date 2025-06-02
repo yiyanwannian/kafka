@@ -1,0 +1,118 @@
+@startuml Kafka Components Detail
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+title Kafka 核心组件详细交互图
+
+package "Network Layer" {
+    component [Acceptor Thread] as ACC
+    component [Processor Thread 1] as PROC1
+    component [Processor Thread 2] as PROC2
+    component [Processor Thread N] as PROCN
+    queue [Request Queue] as RQ
+    queue [Response Queue] as RSQ
+}
+
+package "Request Processing" {
+    component [Handler Thread 1] as HAND1
+    component [Handler Thread 2] as HAND2
+    component [Handler Thread M] as HANDM
+    component [KafkaApis] as APIS
+}
+
+package "Storage Layer" {
+    component [ReplicaManager] as RM
+    component [LogManager] as LM
+    component [Log] as LOG
+    component [LogSegment] as LS
+    file [Data File (.log)] as DF
+    file [Index File (.index)] as IF
+    file [Time Index (.timeindex)] as TIF
+}
+
+package "Coordination" {
+    component [GroupCoordinator] as GC
+    component [TransactionCoordinator] as TC
+    component [MetadataCache] as MC
+}
+
+package "KRaft (New Architecture)" {
+    component [KafkaRaftClient] as KRC
+    component [RaftManager] as RAFTM
+    component [QuorumController] as QC
+}
+
+' Network flow
+ACC --> PROC1 : New Connection
+ACC --> PROC2 : New Connection
+ACC --> PROCN : New Connection
+
+PROC1 --> RQ : Request
+PROC2 --> RQ : Request
+PROCN --> RQ : Request
+
+RQ --> HAND1 : Dequeue
+RQ --> HAND2 : Dequeue
+RQ --> HANDM : Dequeue
+
+HAND1 --> APIS : Process
+HAND2 --> APIS : Process
+HANDM --> APIS : Process
+
+APIS --> RSQ : Response
+RSQ --> PROC1 : Response
+RSQ --> PROC2 : Response
+RSQ --> PROCN : Response
+
+' API processing
+APIS --> RM : Produce/Fetch
+APIS --> GC : Group Operations
+APIS --> TC : Transaction Operations
+APIS --> MC : Metadata Queries
+
+' Storage operations
+RM --> LM : Log Operations
+LM --> LOG : Manage Logs
+LOG --> LS : Active Segment
+LS --> DF : Write Data
+LS --> IF : Update Index
+LS --> TIF : Update Time Index
+
+' KRaft operations
+APIS --> RAFTM : Metadata Changes
+RAFTM --> KRC : Raft Operations
+KRC --> QC : Controller Operations
+QC --> MC : Update Metadata
+
+note right of ACC
+  单线程处理新连接
+  为每个连接分配Processor
+end note
+
+note right of PROC1
+  多线程处理I/O
+  每个线程有自己的Selector
+  读取请求，写入响应
+end note
+
+note right of HAND1
+  多线程处理业务逻辑
+  调用KafkaApis处理请求
+  生成响应
+end note
+
+note bottom of LS
+  日志段包含：
+  - 数据文件：实际消息
+  - 索引文件：偏移量索引
+  - 时间索引：时间戳索引
+end note
+
+note right of KRC
+  KRaft替代Zookeeper
+  - 内置共识协议
+  - 简化架构
+  - 更好的可扩展性
+end note
+
+@enduml

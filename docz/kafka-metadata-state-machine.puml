@@ -1,0 +1,161 @@
+@startuml Kafka元数据处理状态机
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam stateBackgroundColor #F8F9FA
+skinparam stateBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+title Kafka元数据处理状态机 - 基于源码分析
+
+'autonumber
+
+state "元数据记录生命周期" as MetadataLifecycle {
+    
+    state "记录生成阶段" as Generation {
+        state "接收客户端请求" as ClientRequest
+        state "生成元数据记录" as GenerateRecord
+        state "预先重放验证" as PreReplay
+        state "提交到Raft日志" as RaftCommit
+        
+        ClientRequest --> GenerateRecord : 解析请求
+        GenerateRecord --> PreReplay : 验证记录
+        PreReplay --> RaftCommit : 验证成功
+        PreReplay --> ClientRequest : 验证失败
+    }
+    
+    state "Raft处理阶段" as RaftProcessing {
+        state "日志复制" as LogReplication
+        state "达成共识" as Consensus
+        state "提交确认" as CommitConfirm
+        
+        LogReplication --> Consensus : 复制到多数节点
+        Consensus --> CommitConfirm : 达成共识
+        CommitConfirm --> [*] : 通知监听器
+    }
+    
+    state "元数据加载阶段" as MetadataLoading {
+        state "批次处理" as BatchProcessing {
+            state "读取批次" as ReadBatch
+            state "事务状态检查" as TransactionCheck
+            state "记录重放" as RecordReplay
+            state "Delta累积" as DeltaAccumulation
+            
+            ReadBatch --> TransactionCheck
+            TransactionCheck --> RecordReplay : 非事务记录
+            TransactionCheck --> DeltaAccumulation : 事务边界
+            RecordReplay --> DeltaAccumulation
+        }
+        
+        state "镜像生成" as ImageGeneration {
+            state "应用Delta" as ApplyDelta
+            state "创建新镜像" as CreateNewImage
+            state "结构共享优化" as StructuralSharing
+            
+            ApplyDelta --> CreateNewImage
+            CreateNewImage --> StructuralSharing
+        }
+    }
+    
+    state "元数据发布阶段" as MetadataPublishing {
+        state "发布器通知" as PublisherNotification {
+            state "缓存更新" as CacheUpdate
+            state "特性版本更新" as FeatureUpdate
+            state "配置应用" as ConfigApplication
+            state "状态同步" as StateSync
+            
+            [*] --> CacheUpdate
+            [*] --> FeatureUpdate
+            [*] --> ConfigApplication
+            [*] --> StateSync
+        }
+    }
+}
+
+state "事务状态管理" as TransactionStates {
+    state "NO_TRANSACTION" as NoTx
+    state "STARTED_TRANSACTION" as StartedTx
+    state "CONTINUED_TRANSACTION" as ContinuedTx
+    state "ENDED_TRANSACTION" as EndedTx
+    state "ABORTED_TRANSACTION" as AbortedTx
+    
+    NoTx --> StartedTx : BeginTransactionRecord
+    StartedTx --> ContinuedTx : 普通记录
+    ContinuedTx --> ContinuedTx : 更多记录
+    StartedTx --> EndedTx : EndTransactionRecord
+    ContinuedTx --> EndedTx : EndTransactionRecord
+    StartedTx --> AbortedTx : AbortTransactionRecord
+    ContinuedTx --> AbortedTx : AbortTransactionRecord
+    EndedTx --> NoTx : 发布Delta
+    AbortedTx --> NoTx : 丢弃Delta
+}
+
+state "快照处理流程" as SnapshotProcessing {
+    state "快照检测" as SnapshotDetection
+    state "快照加载" as SnapshotLoading
+    state "快照重放" as SnapshotReplay
+    state "快照完成" as SnapshotComplete
+    
+    SnapshotDetection --> SnapshotLoading : 发现新快照
+    SnapshotLoading --> SnapshotReplay : 读取快照数据
+    SnapshotReplay --> SnapshotComplete : 重放所有记录
+    SnapshotComplete --> [*] : 通知发布器
+}
+
+state "错误处理状态" as ErrorHandling {
+    state "记录验证失败" as ValidationError
+    state "重放失败" as ReplayError
+    state "发布器异常" as PublisherError
+    state "致命错误" as FatalError
+    state "错误恢复" as ErrorRecovery
+    
+    ValidationError --> ErrorRecovery : 非致命错误
+    ReplayError --> FatalError : 致命错误
+    PublisherError --> ErrorRecovery : 隔离错误
+    FatalError --> [*] : 系统关闭
+    ErrorRecovery --> [*] : 继续处理
+}
+
+' 主要状态转换
+Generation --> RaftProcessing : 记录提交
+RaftProcessing --> MetadataLoading : 提交通知
+MetadataLoading --> MetadataPublishing : 镜像生成完成
+MetadataPublishing --> [*] : 发布完成
+
+' 特殊流程
+[*] --> SnapshotProcessing : 启动时加载快照
+SnapshotProcessing --> MetadataPublishing : 快照加载完成
+
+' 错误处理
+Generation --> ErrorHandling : 验证失败
+MetadataLoading --> ErrorHandling : 处理异常
+MetadataPublishing --> ErrorHandling : 发布异常
+
+note top of MetadataLifecycle
+    <b>元数据记录处理的完整生命周期</b>
+    从客户端请求到最终应用的全过程
+end note
+
+note right of TransactionStates
+    <b>事务状态管理</b>
+    确保元数据记录的原子性提交
+    支持批量操作的一致性
+end note
+
+note bottom of SnapshotProcessing
+    <b>快照处理优化</b>
+    减少启动时间
+    避免重放大量历史记录
+end note
+
+note left of ErrorHandling
+    <b>多层错误处理</b>
+    • 验证错误：请求级别
+    • 重放错误：记录级别  
+    • 发布错误：组件级别
+    • 致命错误：系统级别
+end note
+
+@enduml

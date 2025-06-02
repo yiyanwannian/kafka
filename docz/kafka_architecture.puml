@@ -1,0 +1,135 @@
+@startuml Kafka Architecture Overview
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam componentStyle rectangle
+
+title Apache Kafka 整体架构图
+
+package "Kafka Cluster" {
+    package "Broker 1" {
+        component [SocketServer] as SS1
+        component [KafkaApis] as API1
+        component [ReplicaManager] as RM1
+        component [LogManager] as LM1
+        database "Topic Partitions" as TP1
+        
+        SS1 --> API1
+        API1 --> RM1
+        RM1 --> LM1
+        LM1 --> TP1
+    }
+    
+    package "Broker 2" {
+        component [SocketServer] as SS2
+        component [KafkaApis] as API2
+        component [ReplicaManager] as RM2
+        component [LogManager] as LM2
+        database "Topic Partitions" as TP2
+        
+        SS2 --> API2
+        API2 --> RM2
+        RM2 --> LM2
+        LM2 --> TP2
+    }
+    
+    package "Broker 3" {
+        component [SocketServer] as SS3
+        component [KafkaApis] as API3
+        component [ReplicaManager] as RM3
+        component [LogManager] as LM3
+        database "Topic Partitions" as TP3
+        
+        SS3 --> API3
+        API3 --> RM3
+        RM3 --> LM3
+        LM3 --> TP3
+    }
+    
+    component [Controller] as CTRL
+    component [GroupCoordinator] as GC
+    component [TransactionCoordinator] as TC
+}
+
+package "Client APIs" {
+    component [Producer API] as PROD
+    component [Consumer API] as CONS
+    component [Streams API] as STREAMS
+    component [Connect API] as CONNECT
+    component [Admin API] as ADMIN
+}
+
+package "External Systems" {
+    database [Source Systems] as SRC
+    database [Sink Systems] as SINK
+    component [Stream Processing Apps] as APPS
+}
+
+' Client connections
+PROD --> SS1
+PROD --> SS2
+PROD --> SS3
+
+CONS --> SS1
+CONS --> SS2
+CONS --> SS3
+
+ADMIN --> SS1
+ADMIN --> SS2
+ADMIN --> SS3
+
+' Streams and Connect
+STREAMS --> PROD
+STREAMS --> CONS
+STREAMS --> APPS
+
+CONNECT --> PROD
+CONNECT --> CONS
+CONNECT --> SRC
+CONNECT --> SINK
+
+' Internal cluster communication
+CTRL <--> SS1
+CTRL <--> SS2
+CTRL <--> SS3
+
+GC <--> SS1
+GC <--> SS2
+GC <--> SS3
+
+TC <--> SS1
+TC <--> SS2
+TC <--> SS3
+
+' Replication
+RM1 <--> RM2
+RM2 <--> RM3
+RM1 <--> RM3
+
+note right of CTRL
+  KRaft Controller
+  - Metadata management
+  - Leader election
+  - Partition assignment
+end note
+
+note right of GC
+  Group Coordinator
+  - Consumer group management
+  - Offset management
+  - Rebalancing
+end note
+
+note right of TC
+  Transaction Coordinator
+  - Transaction state management
+  - Exactly-once semantics
+end note
+
+note bottom of TP1
+  Log Segments
+  - Data files (.log)
+  - Index files (.index)
+  - Time index (.timeindex)
+end note
+
+@enduml

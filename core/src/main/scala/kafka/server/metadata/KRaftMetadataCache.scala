@@ -54,11 +54,17 @@ class KRaftMetadataCache(
   // any lock) need to grab the value of this variable once, and retain that read copy for
   // the duration of their operation. Multiple reads of this value risk getting different
   // image values.
+  // 这是缓存状态。每个 MetadataImage 实例都是不可变的，更新时会用一个全新的实例替换该值。
+  // 这意味着读取操作（未加锁）需要在操作期间获取该变量的一份副本，并始终使用这份副本。
+  // 多次读取该变量可能会得到不同的 image 值。
   @volatile private var _currentImage: MetadataImage = MetadataImage.EMPTY
 
   // This method is the main hotspot when it comes to the performance of metadata requests,
   // we should be careful about adding additional logic here.
   // filterUnavailableEndpoints exists to support v0 MetadataResponses
+  // 该方法是元数据请求性能的主要热点，
+  // 在这里添加额外逻辑时需要格外小心。
+  // filterUnavailableEndpoints 用于支持 v0 版本的 MetadataResponses
   private def maybeFilterAliveReplicas(image: MetadataImage,
                                        brokers: Array[Int],
                                        listenerName: ListenerName,

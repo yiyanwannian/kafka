@@ -1,0 +1,177 @@
+@startuml FeaturesPublisher工作流程图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam classBackgroundColor #F8F9FA
+skinparam classBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+title FeaturesPublisher 工作流程和组件关系图
+
+' 为不同类型的组件设置不同的背景色
+skinparam class {
+    BackgroundColor<<publisher>> #FFF3E0
+    BackgroundColor<<manager>> #E8F5E8
+    BackgroundColor<<controller>> #E3F2FD
+    BackgroundColor<<client>> #FCE4EC
+    BackgroundColor<<metadata>> #F3E5F5
+    BackgroundColor<<feature>> #E0F2F1
+}
+
+package "特性版本管理核心" {
+    class FeaturesPublisher <<publisher>> {
+        - log: Logger
+        - finalizedFeatures: volatile FinalizedFeatures
+        --
+        + features(): FinalizedFeatures
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): void
+        + name(): String
+    }
+    
+    class FinalizedFeatures <<feature>> {
+        - metadataVersion: MetadataVersion
+        - finalizedFeatures: Map<String, Short>
+        - finalizedFeaturesEpoch: long
+        --
+        + setFinalizedLevel(String, short): FinalizedFeatures
+        + fromKRaftVersion(MetadataVersion): FinalizedFeatures
+    }
+    
+    note right of FinalizedFeatures
+        支持的特性类型：
+        • metadata.version (1-19+)
+        • kraft.version (0-1)
+        • eligible.leader.replicas (0-1)
+        • group.version (0-1)
+        • transaction.version (0-2)
+        • share.version (0-1)
+    end note
+}
+
+package "API版本管理" {
+    class SimpleApiVersionManager <<manager>> {
+        - listenerType: ListenerType
+        - brokerFeatures: Features<SupportedVersionRange>
+        - enableUnstableLastVersion: boolean
+        - featuresProvider: Supplier<FinalizedFeatures>
+        --
+        + apiVersionResponse(int, boolean): ApiVersionsResponse
+        + features(): FinalizedFeatures
+    }
+    
+    class ApiVersionsResponse <<manager>> {
+        - apiVersions: ApiVersionCollection
+        - supportedFeatures: Features<SupportedVersionRange>
+        - finalizedFeatures: Map<String, Short>
+        - finalizedFeaturesEpoch: long
+    }
+}
+
+package "控制器组件" {
+    class ControllerServer <<controller>> {
+        - featuresPublisher: FeaturesPublisher
+        - apiVersionManager: SimpleApiVersionManager
+        - raftManager: RaftManager
+        --
+        + startup(): void
+    }
+    
+    class QuorumController <<controller>> {
+        - metadataPublishers: List<MetadataPublisher>
+        --
+        + handleCommit(List<ApiMessageAndVersion>): void
+    }
+}
+
+package "元数据管理" {
+    class MetadataDelta <<metadata>> {
+        - featuresDelta: FeaturesDelta
+        --
+        + featuresDelta(): FeaturesDelta
+        + replay(FeatureLevelRecord): void
+    }
+    
+    class MetadataImage <<metadata>> {
+        - features: FeaturesImage
+        - provenance: MetadataProvenance
+        --
+        + features(): FeaturesImage
+        + provenance(): MetadataProvenance
+    }
+    
+    class FeatureLevelRecord <<metadata>> {
+        - name: String
+        - featureLevel: short
+    }
+}
+
+package "客户端交互" {
+    class KafkaClient <<client>> {
+        + sendApiVersionsRequest(): ApiVersionsResponse
+    }
+    
+    class BrokerMetadataPublisher <<publisher>> {
+        - finalizedShareVersion: Short
+        --
+        + onMetadataUpdate(MetadataDelta, MetadataImage, LoaderManifest): void
+    }
+}
+
+' 关系定义 - 连接线颜色与目标组件背景色对应
+FeaturesPublisher -[#E0F2F1]-> FinalizedFeatures : 维护
+ControllerServer -[#FFF3E0]-> FeaturesPublisher : 创建和使用
+ControllerServer -[#E8F5E8]-> SimpleApiVersionManager : 创建
+SimpleApiVersionManager -[#FFF3E0]-> FeaturesPublisher : 使用作为featuresProvider
+SimpleApiVersionManager -[#E8F5E8]-> ApiVersionsResponse : 生成
+
+QuorumController -[#FFF3E0]-> FeaturesPublisher : 通知元数据更新
+MetadataDelta -[#FFF3E0]-> FeaturesPublisher : 触发onMetadataUpdate
+MetadataImage -[#FFF3E0]-> FeaturesPublisher : 提供新的特性数据
+
+KafkaClient -[#E8F5E8]-> SimpleApiVersionManager : 请求API版本
+KafkaClient -[#E8F5E8]-> ApiVersionsResponse : 接收响应
+
+BrokerMetadataPublisher -[#F3E5F5]-> MetadataDelta : 监听特性变更
+BrokerMetadataPublisher -[#F3E5F5]-> MetadataImage : 获取特性信息
+
+MetadataDelta -[#F3E5F5]-> FeatureLevelRecord : 重放记录
+MetadataImage -[#F3E5F5]-> FinalizedFeatures : 包含特性信息
+
+' 工作流程序列
+note as WorkflowSteps
+    <b>特性版本更新流程：</b>
+    1. 接收FeatureLevelRecord
+    2. MetadataDelta重放记录
+    3. 创建新的MetadataImage
+    4. 通知FeaturesPublisher
+    5. 更新FinalizedFeatures
+    6. 客户端获取新版本信息
+end note
+
+' 初始化流程
+note as InitFlow
+    <b>初始化流程：</b>
+    1. ControllerServer创建FeaturesPublisher
+    2. 初始化为MINIMUM_VERSION
+    3. 创建SimpleApiVersionManager
+    4. 设置FeaturesPublisher为特性提供者
+    5. 注册到元数据发布器列表
+end note
+
+' 特性版本示例
+note as FeatureExample
+    <b>特性版本示例：</b>
+    {
+      "metadata.version": 19,
+      "kraft.version": 1,
+      "eligible.leader.replicas": 1,
+      "group.version": 1,
+      "transaction.version": 2
+    }
+    
+    <b>纪元：</b> 12345
+end note
+
+@enduml

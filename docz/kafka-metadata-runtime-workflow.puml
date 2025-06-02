@@ -1,0 +1,273 @@
+@startuml Kafka元数据运行时工作流程
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam participantBackgroundColor #F8F9FA
+skinparam participantBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+title Kafka元数据运行时工作流程 - 基于源码分析
+autonumber
+
+' 参与者定义
+participant "客户端请求" as Client
+participant "QuorumController" as QC
+participant "KafkaRaftClient" as Raft
+participant "MetadataLoader" as ML
+participant "MetadataBatchLoader" as MBL
+participant "MetadataDelta" as MD
+participant "MetadataImage" as MI
+participant "MetadataPublisher[]" as Publishers
+participant "KRaftMetadataCache" as Cache
+participant "FeaturesPublisher" as FP
+participant "BrokerMetadataPublisher" as BMP
+
+== 1. 元数据记录生成和提交阶段 ==
+
+Client ->> QC: 发送管理请求 (CreateTopic, AlterConfig等)
+activate QC
+
+note over QC
+    QuorumController.handleRequest()
+    生成相应的元数据记录
+end note
+
+QC ->> QC: 生成ApiMessageAndVersion记录
+note right: 如TopicRecord, ConfigRecord等
+
+QC ->> QC: 预先重放到内存状态
+note right
+    replay(message, Optional.empty(), recordOffset)
+    确保记录可以正确应用
+end note
+
+QC ->> Raft: raftClient.prepareAppend(epoch, records)
+activate Raft
+note right: 准备将记录追加到Raft日志
+
+Raft ->> Raft: 写入本地日志
+Raft ->> Raft: 复制到其他节点
+Raft -->> QC: 返回预期偏移量
+deactivate Raft
+
+QC -->> Client: 返回响应 (可能是异步的)
+deactivate QC
+
+== 2. Raft提交通知阶段 ==
+
+Raft ->> QC: handleCommit(BatchReader)
+activate QC
+activate Raft
+
+note over QC
+    QuorumMetaLogListener.handleCommit()
+    处理已提交的记录批次
+end note
+
+loop 处理每个批次
+    QC ->> QC: 读取Batch<ApiMessageAndVersion>
+    
+    alt 如果是活跃控制器
+        QC ->> QC: 更新offsetControl
+        QC ->> QC: 完成延迟操作
+        note right: deferredEventQueue.completeUpTo()
+    else 如果是备用控制器
+        QC ->> QC: 重放记录到内存状态
+        note right: 保持与活跃控制器同步
+    end
+end
+
+QC ->> ML: 转发给MetadataLoader
+deactivate QC
+
+== 3. 元数据加载和处理阶段 ==
+
+ML ->> ML: eventQueue.append(handleCommit)
+activate ML
+
+note over ML
+    MetadataLoader.handleCommit()
+    在专用线程中处理
+end note
+
+loop 处理BatchReader中的每个批次
+    ML ->> MBL: batchLoader.loadBatch(batch, leaderAndEpoch)
+    activate MBL
+    
+    note over MBL
+        MetadataBatchLoader.loadBatch()
+        处理事务状态和记录重放
+    end note
+    
+    loop 处理批次中的每条记录
+        MBL ->> MD: delta.replay(record.message())
+        activate MD
+        
+        note over MD
+            根据记录类型调用相应的replay方法:
+            - TopicRecord -> topicsDelta.replay()
+            - ConfigRecord -> configsDelta.replay()
+            - RegisterBrokerRecord -> clusterDelta.replay()
+            等等
+        end note
+        
+        MD ->> MD: 更新相应的Delta组件
+        deactivate MD
+    end
+    
+    alt 如果事务结束或无事务
+        MBL ->> MBL: applyDeltaAndUpdate(delta, manifest)
+        MBL ->> MI: image = delta.apply(provenance)
+        activate MI
+        
+        note over MI
+            MetadataDelta.apply()
+            生成新的MetadataImage
+        end note
+        
+        MI ->> MI: 创建新的Image组件
+        note right
+            - FeaturesImage
+            - ClusterImage  
+            - TopicsImage
+            - ConfigurationsImage
+            等等
+        end note
+        
+        MI -->> MBL: 返回新的MetadataImage
+        deactivate MI
+        
+        MBL ->> ML: callback.update(delta, image, manifest)
+    end
+    
+    deactivate MBL
+end
+
+ML ->> ML: batchLoader.maybeFlushBatches()
+
+== 4. 元数据发布阶段 ==
+
+ML ->> ML: maybePublishMetadata(delta, image, manifest)
+
+note over ML
+    MetadataLoader.maybePublishMetadata()
+    通知所有已注册的发布器
+end note
+
+loop 通知每个MetadataPublisher
+    ML ->> Publishers: publisher.onMetadataUpdate(delta, newImage, manifest)
+    activate Publishers
+
+    par 并行通知各个发布器
+        Publishers ->> Cache: KRaftMetadataCachePublisher
+        activate Cache
+        Cache ->> Cache: metadataCache.setImage(newImage)
+        note right: 更新Broker的元数据缓存
+        deactivate Cache
+
+        Publishers ->> FP: FeaturesPublisher
+        activate FP
+        FP ->> FP: 更新finalizedFeatures
+        note right: 更新特性版本信息
+        deactivate FP
+
+        Publishers ->> BMP: BrokerMetadataPublisher
+        activate BMP
+        BMP ->> BMP: 处理各种元数据变更
+        note right
+            - 更新分区状态
+            - 处理配置变更
+            - 管理配额设置
+            等等
+        end note
+        deactivate BMP
+    end
+
+    deactivate Publishers
+end
+
+ML ->> ML: 更新metrics和状态
+deactivate ML
+
+deactivate Raft
+
+== 5. 快照处理流程 (可选) ==
+
+alt 当需要加载快照时
+    Raft ->> ML: handleLoadSnapshot(SnapshotReader)
+    activate ML
+    activate Raft
+    
+    note over ML
+        MetadataLoader.handleLoadSnapshot()
+        从快照恢复元数据状态
+    end note
+    
+    ML ->> ML: 创建空的MetadataDelta
+    ML ->> ML: loadSnapshot(delta, reader)
+    
+    loop 读取快照中的每个批次
+        ML ->> MD: delta.replay(record)
+        activate MD
+        MD ->> MD: 重放快照记录
+        deactivate MD
+    end
+    
+    ML ->> MD: delta.finishSnapshot()
+    activate MD
+    note over MD: 完成快照加载，清理未引用的数据
+    deactivate MD
+    
+    ML ->> MI: image = delta.apply(provenance)
+    activate MI
+    MI -->> ML: 返回新的MetadataImage
+    deactivate MI
+    
+    ML ->> Publishers: 通知所有发布器
+    activate Publishers
+    Publishers ->> Publishers: 处理快照数据
+    deactivate Publishers
+    
+    deactivate ML
+    deactivate Raft
+end
+
+== 6. 领导者变更处理 ==
+
+alt 当控制器领导者发生变更时
+    Raft ->> ML: handleLeaderChange(LeaderAndEpoch)
+    activate ML
+    activate Raft
+    
+    note over ML
+        MetadataLoader.handleLeaderChange()
+        通知发布器领导者变更
+    end note
+    
+    ML ->> ML: 更新currentLeaderAndEpoch
+    
+    loop 通知每个发布器
+        ML ->> Publishers: publisher.onControllerChange(leaderAndEpoch)
+        activate Publishers
+        Publishers ->> Publishers: 处理领导者变更
+        note right: 可能需要重新连接或重置状态
+        deactivate Publishers
+    end
+    
+    deactivate ML
+    deactivate Raft
+end
+
+note over Client, BMP
+    <b>关键设计特点:</b>
+    1. <b>异步处理:</b> 使用事件队列确保元数据处理不阻塞Raft线程
+    2. <b>事务支持:</b> 支持元数据记录的事务性批量提交
+    3. <b>增量更新:</b> 通过Delta机制实现高效的增量更新
+    4. <b>发布器模式:</b> 解耦元数据生产者和消费者
+    5. <b>故障处理:</b> 完善的错误处理和恢复机制
+    6. <b>快照优化:</b> 支持快照加载以减少启动时间
+end note
+
+@enduml

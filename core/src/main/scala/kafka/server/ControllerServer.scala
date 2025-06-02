@@ -120,38 +120,54 @@ class ControllerServer(
 
   def clusterId: String = sharedServer.clusterId
 
+  /**
+   * 启动控制器服务器
+   *
+   * 此方法负责初始化和启动Kafka控制器的所有组件，包括：
+   * - 状态管理和日志配置
+   * - 指标收集器和监控组件
+   * - 授权插件和安全组件
+   * - 元数据缓存和发布器
+   * - Socket服务器和API处理器
+   * - 配额管理器和策略组件
+   * - 控制器核心组件和Raft客户端
+   * - 各种元数据发布器和管理器
+   *
+   * 启动过程是有序的，确保所有依赖组件在使用前都已正确初始化。
+   * 如果启动过程中发生异常，会自动清理已初始化的资源并重新抛出异常。
+   */
   def startup(): Unit = {
-    if (!maybeChangeStatus(SHUTDOWN, STARTING)) return
-    val startupDeadline = Deadline.fromDelay(time, config.serverMaxStartupTimeMs, TimeUnit.MILLISECONDS)
+    if (!maybeChangeStatus(SHUTDOWN, STARTING)) return // 检查并更改状态从SHUTDOWN到STARTING
+    val startupDeadline = Deadline.fromDelay(time, config.serverMaxStartupTimeMs, TimeUnit.MILLISECONDS) // 设置启动超时时间
     try {
-      this.logIdent = logContext.logPrefix()
-      info("Starting controller")
-      config.dynamicConfig.initialize(clientMetricsReceiverPluginOpt = None)
+      this.logIdent = logContext.logPrefix() // 设置日志标识符
+      info("Starting controller") // 记录启动日志
+      config.dynamicConfig.initialize(clientMetricsReceiverPluginOpt = None) // 初始化动态配置
 
-      maybeChangeStatus(STARTING, STARTED)
+      maybeChangeStatus(STARTING, STARTED) // 更改状态从STARTING到STARTED
 
-      metricsGroup.newGauge("ClusterId", () => clusterId)
-      metricsGroup.newGauge("yammer-metrics-count", () =>  KafkaYammerMetrics.defaultRegistry.allMetrics.size)
+      metricsGroup.newGauge("ClusterId", () => clusterId) // 注册集群ID指标
+      metricsGroup.newGauge("yammer-metrics-count", () =>  KafkaYammerMetrics.defaultRegistry.allMetrics.size) // 注册Yammer指标数量
 
-      linuxIoMetricsCollector = new LinuxIoMetricsCollector("/proc", time)
-      if (linuxIoMetricsCollector.usable()) {
-        metricsGroup.newGauge("linux-disk-read-bytes", () => linuxIoMetricsCollector.readBytes())
-        metricsGroup.newGauge("linux-disk-write-bytes", () => linuxIoMetricsCollector.writeBytes())
+      linuxIoMetricsCollector = new LinuxIoMetricsCollector("/proc", time) // 创建Linux IO指标收集器
+      if (linuxIoMetricsCollector.usable()) { // 如果IO指标收集器可用
+        metricsGroup.newGauge("linux-disk-read-bytes", () => linuxIoMetricsCollector.readBytes()) // 注册磁盘读取字节数指标
+        metricsGroup.newGauge("linux-disk-write-bytes", () => linuxIoMetricsCollector.writeBytes()) // 注册磁盘写入字节数指标
       }
 
-      authorizerPlugin = config.createNewAuthorizer(metrics, ProcessRole.ControllerRole.toString)
+      authorizerPlugin = config.createNewAuthorizer(metrics, ProcessRole.ControllerRole.toString) // 创建授权插件
 
-      metadataCache = new KRaftMetadataCache(config.nodeId, () => raftManager.client.kraftVersion())
+      metadataCache = new KRaftMetadataCache(config.nodeId, () => raftManager.client.kraftVersion()) // 创建KRaft元数据缓存
 
-      metadataCachePublisher = new KRaftMetadataCachePublisher(metadataCache)
+      metadataCachePublisher = new KRaftMetadataCachePublisher(metadataCache) // 创建元数据缓存发布器
 
-      featuresPublisher = new FeaturesPublisher(logContext)
+      featuresPublisher = new FeaturesPublisher(logContext) // 创建特性发布器
 
-      registrationsPublisher = new ControllerRegistrationsPublisher()
+      registrationsPublisher = new ControllerRegistrationsPublisher() // 创建控制器注册发布器
 
-      incarnationId = Uuid.randomUuid()
+      incarnationId = Uuid.randomUuid() // 生成随机的实例化ID
 
-      val apiVersionManager = new SimpleApiVersionManager(
+      val apiVersionManager = new SimpleApiVersionManager( // 创建API版本管理器
         ListenerType.CONTROLLER,
         config.unstableApiVersionsEnabled,
         () => featuresPublisher.features().setFinalizedLevel(
@@ -160,26 +176,26 @@ class ControllerServer(
       )
 
       //  metrics will be set to null when closing a controller, so we should recreate it for testing
-      if (sharedServer.metrics == null){
+      if (sharedServer.metrics == null){ // 如果指标对象为空，重新创建（用于测试）
         sharedServer.metrics = new Metrics()
       }
 
-      tokenCache = new DelegationTokenCache(ScramMechanism.mechanismNames)
-      credentialProvider = new CredentialProvider(ScramMechanism.mechanismNames, tokenCache)
-      socketServer = new SocketServer(config,
+      tokenCache = new DelegationTokenCache(ScramMechanism.mechanismNames) // 创建委托令牌缓存
+      credentialProvider = new CredentialProvider(ScramMechanism.mechanismNames, tokenCache) // 创建凭证提供器
+      socketServer = new SocketServer(config, // 创建Socket服务器
         metrics,
         time,
         credentialProvider,
         apiVersionManager,
         sharedServer.socketFactory)
 
-      val listenerInfo = ListenerInfo
+      val listenerInfo = ListenerInfo // 创建监听器信息
         .create(config.effectiveAdvertisedControllerListeners.asJava)
         .withWildcardHostnamesResolved()
         .withEphemeralPortsCorrected(name => socketServer.boundPort(new ListenerName(name)))
-      socketServerFirstBoundPortFuture.complete(listenerInfo.firstListener().port())
+      socketServerFirstBoundPortFuture.complete(listenerInfo.firstListener().port()) // 完成第一个绑定端口的Future
 
-      val endpointReadyFutures = {
+      val endpointReadyFutures = { // 创建端点就绪Future
         val builder = new EndpointReadyFutures.Builder()
         builder.build(authorizerPlugin.toJava,
           new KafkaAuthorizerServerInfo(
@@ -190,24 +206,24 @@ class ControllerServer(
             config.earlyStartListeners.map(_.value()).asJava))
       }
 
-      sharedServer.startForController(listenerInfo)
+      sharedServer.startForController(listenerInfo) // 启动共享服务器的控制器部分
 
-      createTopicPolicy = Option(config.
+      createTopicPolicy = Option(config. // 创建主题策略配置
         getConfiguredInstance(CREATE_TOPIC_POLICY_CLASS_NAME_CONFIG, classOf[CreateTopicPolicy]))
-      alterConfigPolicy = Option(config.
+      alterConfigPolicy = Option(config. // 修改配置策略配置
         getConfiguredInstance(ALTER_CONFIG_POLICY_CLASS_NAME_CONFIG, classOf[AlterConfigPolicy]))
 
-      val voterConnections = FutureUtils.waitWithLogging(logger.underlying, logIdent,
+      val voterConnections = FutureUtils.waitWithLogging(logger.underlying, logIdent, // 等待控制器仲裁投票者连接
         "controller quorum voters future",
         sharedServer.controllerQuorumVotersFuture,
         startupDeadline, time)
-      val controllerNodes = QuorumConfig.voterConnectionsToNodes(voterConnections)
-      val quorumFeatures = new QuorumFeatures(config.nodeId,
+      val controllerNodes = QuorumConfig.voterConnectionsToNodes(voterConnections) // 将投票者连接转换为节点
+      val quorumFeatures = new QuorumFeatures(config.nodeId, // 创建仲裁特性配置
         QuorumFeatures.defaultSupportedFeatureMap(config.unstableFeatureVersionsEnabled),
         controllerNodes.asScala.map(node => Integer.valueOf(node.id())).asJava)
 
-      val delegationTokenManagerConfigs = new DelegationTokenManagerConfigs(config)
-      val delegationTokenKeyString = {
+      val delegationTokenManagerConfigs = new DelegationTokenManagerConfigs(config) // 创建委托令牌管理器配置
+      val delegationTokenKeyString = { // 获取委托令牌密钥字符串
         if (delegationTokenManagerConfigs.tokenAuthEnabled) {
           delegationTokenManagerConfigs.delegationTokenSecretKey.value
         } else {
@@ -215,64 +231,64 @@ class ControllerServer(
         }
       }
 
-      val controllerBuilder = {
-        val leaderImbalanceCheckIntervalNs = if (config.autoLeaderRebalanceEnable) {
+      val controllerBuilder = { // 创建控制器构建器
+        val leaderImbalanceCheckIntervalNs = if (config.autoLeaderRebalanceEnable) { // 如果启用自动领导者重平衡，设置检查间隔
           OptionalLong.of(TimeUnit.NANOSECONDS.convert(config.leaderImbalanceCheckIntervalSeconds, TimeUnit.SECONDS))
         } else {
           OptionalLong.empty()
         }
 
-        val maxIdleIntervalNs = config.metadataMaxIdleIntervalNs.fold(OptionalLong.empty)(OptionalLong.of)
+        val maxIdleIntervalNs = config.metadataMaxIdleIntervalNs.fold(OptionalLong.empty)(OptionalLong.of) // 设置最大空闲间隔
 
-        quorumControllerMetrics = new QuorumControllerMetrics(Optional.of(KafkaYammerMetrics.defaultRegistry), time, config.brokerSessionTimeoutMs)
+        quorumControllerMetrics = new QuorumControllerMetrics(Optional.of(KafkaYammerMetrics.defaultRegistry), time, config.brokerSessionTimeoutMs) // 创建仲裁控制器指标
 
-        new QuorumController.Builder(config.nodeId, sharedServer.clusterId).
-          setTime(time).
-          setThreadNamePrefix(s"quorum-controller-${config.nodeId}-").
-          setConfigSchema(configSchema).
-          setRaftClient(raftManager.client).
-          setQuorumFeatures(quorumFeatures).
-          setDefaultReplicationFactor(config.defaultReplicationFactor.toShort).
-          setDefaultNumPartitions(config.numPartitions.intValue()).
-          setSessionTimeoutNs(TimeUnit.NANOSECONDS.convert(config.brokerSessionTimeoutMs.longValue(),
+        new QuorumController.Builder(config.nodeId, sharedServer.clusterId). // 创建仲裁控制器构建器
+          setTime(time). // 设置时间
+          setThreadNamePrefix(s"quorum-controller-${config.nodeId}-"). // 设置线程名前缀
+          setConfigSchema(configSchema). // 设置配置模式
+          setRaftClient(raftManager.client). // 设置Raft客户端
+          setQuorumFeatures(quorumFeatures). // 设置仲裁特性
+          setDefaultReplicationFactor(config.defaultReplicationFactor.toShort). // 设置默认复制因子
+          setDefaultNumPartitions(config.numPartitions.intValue()). // 设置默认分区数
+          setSessionTimeoutNs(TimeUnit.NANOSECONDS.convert(config.brokerSessionTimeoutMs.longValue(), // 设置会话超时时间
             TimeUnit.MILLISECONDS)).
-          setLeaderImbalanceCheckIntervalNs(leaderImbalanceCheckIntervalNs).
-          setMaxIdleIntervalNs(maxIdleIntervalNs).
-          setMetrics(quorumControllerMetrics).
-          setCreateTopicPolicy(createTopicPolicy.toJava).
-          setAlterConfigPolicy(alterConfigPolicy.toJava).
-          setConfigurationValidator(new ControllerConfigurationValidator(sharedServer.brokerConfig)).
-          setStaticConfig(config.originals).
-          setBootstrapMetadata(bootstrapMetadata).
-          setFatalFaultHandler(sharedServer.fatalQuorumControllerFaultHandler).
-          setNonFatalFaultHandler(sharedServer.nonFatalQuorumControllerFaultHandler).
-          setDelegationTokenCache(tokenCache).
-          setDelegationTokenSecretKey(delegationTokenKeyString).
-          setDelegationTokenMaxLifeMs(delegationTokenManagerConfigs.delegationTokenMaxLifeMs).
-          setDelegationTokenExpiryTimeMs(delegationTokenManagerConfigs.delegationTokenExpiryTimeMs).
-          setDelegationTokenExpiryCheckIntervalMs(delegationTokenManagerConfigs.delegationTokenExpiryCheckIntervalMs).
-          setUncleanLeaderElectionCheckIntervalMs(config.uncleanLeaderElectionCheckIntervalMs).
-          setInterBrokerListenerName(config.interBrokerListenerName.value()).
-          setControllerPerformanceSamplePeriodMs(config.controllerPerformanceSamplePeriodMs).
-          setControllerPerformanceAlwaysLogThresholdMs(config.controllerPerformanceAlwaysLogThresholdMs)
+          setLeaderImbalanceCheckIntervalNs(leaderImbalanceCheckIntervalNs). // 设置领导者不平衡检查间隔
+          setMaxIdleIntervalNs(maxIdleIntervalNs). // 设置最大空闲间隔
+          setMetrics(quorumControllerMetrics). // 设置指标
+          setCreateTopicPolicy(createTopicPolicy.toJava). // 设置创建主题策略
+          setAlterConfigPolicy(alterConfigPolicy.toJava). // 设置修改配置策略
+          setConfigurationValidator(new ControllerConfigurationValidator(sharedServer.brokerConfig)). // 设置配置验证器
+          setStaticConfig(config.originals). // 设置静态配置
+          setBootstrapMetadata(bootstrapMetadata). // 设置引导元数据
+          setFatalFaultHandler(sharedServer.fatalQuorumControllerFaultHandler). // 设置致命故障处理器
+          setNonFatalFaultHandler(sharedServer.nonFatalQuorumControllerFaultHandler). // 设置非致命故障处理器
+          setDelegationTokenCache(tokenCache). // 设置委托令牌缓存
+          setDelegationTokenSecretKey(delegationTokenKeyString). // 设置委托令牌密钥
+          setDelegationTokenMaxLifeMs(delegationTokenManagerConfigs.delegationTokenMaxLifeMs). // 设置委托令牌最大生命周期
+          setDelegationTokenExpiryTimeMs(delegationTokenManagerConfigs.delegationTokenExpiryTimeMs). // 设置委托令牌过期时间
+          setDelegationTokenExpiryCheckIntervalMs(delegationTokenManagerConfigs.delegationTokenExpiryCheckIntervalMs). // 设置委托令牌过期检查间隔
+          setUncleanLeaderElectionCheckIntervalMs(config.uncleanLeaderElectionCheckIntervalMs). // 设置不洁领导者选举检查间隔
+          setInterBrokerListenerName(config.interBrokerListenerName.value()). // 设置代理间监听器名称
+          setControllerPerformanceSamplePeriodMs(config.controllerPerformanceSamplePeriodMs). // 设置控制器性能采样周期
+          setControllerPerformanceAlwaysLogThresholdMs(config.controllerPerformanceAlwaysLogThresholdMs) // 设置控制器性能总是记录阈值
       }
-      controller = controllerBuilder.build()
+      controller = controllerBuilder.build() // 构建控制器
 
       // If we are using a ClusterMetadataAuthorizer, requests to add or remove ACLs must go
       // through the controller.
-      authorizerPlugin.foreach { plugin =>
+      authorizerPlugin.foreach { plugin => // 如果使用集群元数据授权器，ACL的添加或删除请求必须通过控制器
         plugin.get match {
           case a: ClusterMetadataAuthorizer => a.setAclMutator(controller)
           case _ =>
         }
       }
 
-      quotaManagers = QuotaFactory.instantiate(config,
+      quotaManagers = QuotaFactory.instantiate(config, // 创建配额管理器
         metrics,
         time,
         s"controller-${config.nodeId}-", ProcessRole.ControllerRole.toString)
-      clientQuotaMetadataManager = new ClientQuotaMetadataManager(quotaManagers, socketServer.connectionQuotas)
-      controllerApis = new ControllerApis(socketServer.dataPlaneRequestChannel,
+      clientQuotaMetadataManager = new ClientQuotaMetadataManager(quotaManagers, socketServer.connectionQuotas) // 创建客户端配额元数据管理器
+      controllerApis = new ControllerApis(socketServer.dataPlaneRequestChannel, // 创建控制器API处理器
         authorizerPlugin,
         quotaManagers,
         time,
@@ -283,7 +299,7 @@ class ControllerServer(
         registrationsPublisher,
         apiVersionManager,
         metadataCache)
-      controllerApisHandlerPool = new KafkaRequestHandlerPool(config.nodeId,
+      controllerApisHandlerPool = new KafkaRequestHandlerPool(config.nodeId, // 创建控制器API处理器线程池
         socketServer.dataPlaneRequestChannel,
         controllerApis,
         time,
@@ -292,16 +308,16 @@ class ControllerServer(
         "controller")
 
       // Set up the metadata cache publisher.
-      metadataPublishers.add(metadataCachePublisher)
+      metadataPublishers.add(metadataCachePublisher) // 设置元数据缓存发布器
 
       // Set up the metadata features publisher.
-      metadataPublishers.add(featuresPublisher)
+      metadataPublishers.add(featuresPublisher) // 设置元数据特性发布器
 
       // Set up the controller registrations publisher.
-      metadataPublishers.add(registrationsPublisher)
+      metadataPublishers.add(registrationsPublisher) // 设置控制器注册发布器
 
       // Create the registration manager, which handles sending KIP-919 controller registrations.
-      registrationManager = new ControllerRegistrationManager(config.nodeId,
+      registrationManager = new ControllerRegistrationManager(config.nodeId, // 创建注册管理器，处理KIP-919控制器注册
         clusterId,
         time,
         s"controller-${config.nodeId}-",
@@ -311,10 +327,10 @@ class ControllerServer(
 
       // Add the registration manager to the list of metadata publishers, so that it receives
       // callbacks when the cluster registrations change.
-      metadataPublishers.add(registrationManager)
+      metadataPublishers.add(registrationManager) // 将注册管理器添加到元数据发布器列表，以便在集群注册变更时接收回调
 
       // Set up the dynamic config publisher. This runs even in combined mode, since the broker
-      // has its own separate dynamic configuration object.
+      // has its own separate dynamic configuration object. 设置动态配置发布器。即使在组合模式下也会运行，因为 broker 有自己独立的动态配置对象。
       metadataPublishers.add(new DynamicConfigPublisher(
         config,
         sharedServer.metadataPublishingFaultHandler,
@@ -329,6 +345,8 @@ class ControllerServer(
       // It must be called before DynamicClientQuotaPublisher is installed, since otherwise we may
       // miss the initial update which establishes the dynamic configurations that are in effect on
       // startup.
+      // 注册当前实例以监听 KafkaConfig 的动态配置变更。此操作必须在 authorizer 和 quotaManagers 初始化之后进行，因为会引用这些对象。
+      // 必须在安装 DynamicClientQuotaPublisher 之前调用，否则可能会错过启动时生效的动态配置的初始更新。
       config.dynamicConfig.addReconfigurables(this)
 
       // Set up the client quotas publisher. This will enable controller mutation quotas and any
@@ -382,11 +400,11 @@ class ControllerServer(
       ))
 
       // Install all metadata publishers.
-      FutureUtils.waitWithLogging(logger.underlying, logIdent,
+      FutureUtils.waitWithLogging(logger.underlying, logIdent, // 安装所有元数据发布器
         "the controller metadata publishers to be installed",
         sharedServer.loader.installPublishers(metadataPublishers), startupDeadline, time)
 
-      val authorizerFutures: Map[Endpoint, CompletableFuture[Void]] = endpointReadyFutures.futures().asScala.toMap
+      val authorizerFutures: Map[Endpoint, CompletableFuture[Void]] = endpointReadyFutures.futures().asScala.toMap // 获取授权器Future映射
 
       /**
        * Enable the controller endpoint(s). If we are using an authorizer which stores
@@ -396,13 +414,13 @@ class ControllerServer(
        * publishes metadata from the QuorumController. MetadataPublishers do not publish
        * metadata until the controller has caught up to the high watermark.
        */
-      val socketServerFuture = socketServer.enableRequestProcessing(authorizerFutures)
+      val socketServerFuture = socketServer.enableRequestProcessing(authorizerFutures) // 启用控制器端点请求处理
 
       /**
        * Start the KIP-919 controller registration manager.
        */
-      val controllerNodeProvider = RaftControllerNodeProvider(raftManager, config)
-      registrationChannelManager = new NodeToControllerChannelManagerImpl(
+      val controllerNodeProvider = RaftControllerNodeProvider(raftManager, config) // 创建控制器节点提供器
+      registrationChannelManager = new NodeToControllerChannelManagerImpl( // 创建节点到控制器通道管理器
         controllerNodeProvider,
         time,
         metrics,
@@ -410,24 +428,24 @@ class ControllerServer(
         "registration",
         s"controller-${config.nodeId}-",
         5000)
-      registrationChannelManager.start()
-      registrationManager.start(registrationChannelManager)
+      registrationChannelManager.start() // 启动注册通道管理器
+      registrationManager.start(registrationChannelManager) // 启动注册管理器
 
       // Block here until all the authorizer futures are complete
-      FutureUtils.waitWithLogging(logger.underlying, logIdent,
+      FutureUtils.waitWithLogging(logger.underlying, logIdent, // 等待所有授权器Future完成
         "all of the authorizer futures to be completed",
         CompletableFuture.allOf(authorizerFutures.values.toSeq: _*), startupDeadline, time)
 
       // Wait for all the SocketServer ports to be open, and the Acceptors to be started.
-      FutureUtils.waitWithLogging(logger.underlying, logIdent,
+      FutureUtils.waitWithLogging(logger.underlying, logIdent, // 等待所有SocketServer端口打开和接受器启动
         "all of the SocketServer Acceptors to be started",
         socketServerFuture, startupDeadline, time)
     } catch {
-      case e: Throwable =>
-        maybeChangeStatus(STARTING, STARTED)
-        sharedServer.controllerStartupFaultHandler.handleFault("caught exception", e)
-        shutdown()
-        throw e
+      case e: Throwable => // 捕获异常时的处理
+        maybeChangeStatus(STARTING, STARTED) // 更改状态
+        sharedServer.controllerStartupFaultHandler.handleFault("caught exception", e) // 处理启动故障
+        shutdown() // 关闭服务
+        throw e // 重新抛出异常
     }
   }
 

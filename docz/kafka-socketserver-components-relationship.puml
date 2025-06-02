@@ -1,0 +1,166 @@
+@startuml Kafka SocketServer 和 RequestChannel 组件关系图
+
+!define LIGHTBLUE #E1F5FE
+!define LIGHTGREEN #E8F5E8
+!define LIGHTYELLOW #FFF9C4
+!define LIGHTPINK #FCE4EC
+!define LIGHTGRAY #F5F5F5
+!define LIGHTCYAN #E0F7FA
+
+title Kafka SocketServer 和 RequestChannel 组件关系图
+
+package "客户端层" as ClientLayer LIGHTBLUE {
+  [Kafka Producer] as Producer
+  [Kafka Consumer] as Consumer
+  [Kafka Admin] as Admin
+}
+
+package "网络层 (SocketServer)" as NetworkLayer LIGHTGREEN {
+  
+  package "Acceptor 线程池" as AcceptorPool LIGHTYELLOW {
+    [Data Plane Acceptor] as DataAcceptor
+    [Control Plane Acceptor] as ControlAcceptor
+  }
+  
+  package "Processor 线程池" as ProcessorPool LIGHTPINK {
+    [Processor-0] as P0
+    [Processor-1] as P1
+    [Processor-N] as PN
+  }
+  
+  [Connection Quotas] as ConnQuotas
+  [Network Metrics] as NetworkMetrics
+}
+
+package "请求通道层 (RequestChannel)" as ChannelLayer LIGHTGRAY {
+  
+  package "RequestChannel 核心" as RCCore LIGHTCYAN {
+    component "Request Queue" as ReqQueue
+    component "Callback Queue" as CallbackQueue
+    component "Processors Map" as ProcessorMap
+    component "Request Metrics" as ReqMetrics
+  }
+  
+  package "请求类型" as RequestTypes LIGHTYELLOW {
+    [Request] as Req
+    [CallbackRequest] as CallbackReq
+    [ShutdownRequest] as ShutdownReq
+    [WakeupRequest] as WakeupReq
+  }
+  
+  package "响应类型" as ResponseTypes LIGHTPINK {
+    [SendResponse] as SendResp
+    [NoOpResponse] as NoOpResp
+    [CloseConnectionResponse] as CloseResp
+    [StartThrottlingResponse] as StartThrottleResp
+    [EndThrottlingResponse] as EndThrottleResp
+  }
+}
+
+package "业务处理层" as BusinessLayer LIGHTBLUE {
+  [Request Handler Pool] as HandlerPool
+  [KafkaApis] as APIs
+  [KafkaRequestHandler] as Handler
+}
+
+' 客户端到网络层的连接
+Producer -down-> DataAcceptor : TCP 连接
+Consumer -down-> DataAcceptor : TCP 连接
+Admin -down-> ControlAcceptor : TCP 连接
+
+' Acceptor 到 Processor 的连接分发
+DataAcceptor -down-> P0 : 分发连接
+DataAcceptor -down-> P1 : 分发连接
+DataAcceptor -down-> PN : 分发连接
+
+ControlAcceptor -down-> P0 : 分发连接
+
+' Processor 到 RequestChannel 的请求流
+P0 -down-> ReqQueue : 发送请求
+P1 -down-> ReqQueue : 发送请求
+PN -down-> ReqQueue : 发送请求
+
+' RequestChannel 到业务层的请求流
+ReqQueue -down-> HandlerPool : 取出请求
+HandlerPool -down-> APIs : 处理请求
+APIs -down-> Handler : 业务逻辑
+
+' 业务层到 RequestChannel 的响应流
+Handler -up-> ProcessorMap : 发送响应
+ProcessorMap -up-> P0 : 响应队列
+ProcessorMap -up-> P1 : 响应队列
+ProcessorMap -up-> PN : 响应队列
+
+' Processor 到客户端的响应流
+P0 -up-> Producer : 发送响应
+P1 -up-> Consumer : 发送响应
+PN -up-> Admin : 发送响应
+
+' 内部组件关系
+ConnQuotas -right-> DataAcceptor : 连接限制
+ConnQuotas -right-> ControlAcceptor : 连接限制
+
+NetworkMetrics -down-> ReqMetrics : 监控数据
+ReqMetrics -up-> NetworkMetrics : 指标收集
+
+' 请求类型到队列的关系
+Req -up-> ReqQueue : 入队
+CallbackReq -up-> CallbackQueue : 入队
+ShutdownReq -up-> ReqQueue : 入队
+WakeupReq -up-> ReqQueue : 入队
+
+' 响应类型到处理器映射的关系
+SendResp -down-> ProcessorMap : 路由
+NoOpResp -down-> ProcessorMap : 路由
+CloseResp -down-> ProcessorMap : 路由
+StartThrottleResp -down-> ProcessorMap : 路由
+EndThrottleResp -down-> ProcessorMap : 路由
+
+' 回调队列的特殊处理
+CallbackQueue -right-> ReqQueue : 优先处理
+
+' 注释说明
+note right of DataAcceptor
+  每个监听器一个 Acceptor 线程
+  负责接受新连接
+  支持多种安全协议
+end note
+
+note right of P0
+  N 个 Processor 线程
+  每个都有自己的 Selector
+  处理网络 I/O 操作
+  支持动态扩展
+end note
+
+note right of ReqQueue
+  阻塞队列，容量可配置
+  缓冲待处理请求
+  支持背压机制
+end note
+
+note right of HandlerPool
+  M 个 Handler 线程
+  处理业务逻辑
+  异步处理模式
+end note
+
+note bottom of ProcessorMap
+  线程安全的映射表
+  根据 processor ID 路由响应
+  支持动态添加/删除处理器
+end note
+
+note top of CallbackQueue
+  优先级队列
+  回调请求优先处理
+  支持异步回调机制
+end note
+
+note bottom of ChannelLayer
+  RequestChannel 是网络层和业务层的桥梁
+  实现异步请求-响应处理
+  提供丰富的性能监控指标
+end note
+
+@enduml

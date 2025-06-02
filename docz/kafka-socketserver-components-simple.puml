@@ -1,0 +1,88 @@
+@startuml Kafka SocketServer 组件关系简化图
+
+!define LIGHTBLUE #E1F5FE
+!define LIGHTGREEN #E8F5E8
+!define LIGHTYELLOW #FFF9C4
+!define LIGHTPINK #FCE4EC
+
+title Kafka SocketServer 和 RequestChannel 组件关系简化图
+
+' 客户端
+actor "Kafka Client" as Client LIGHTBLUE
+
+' 网络层
+package "SocketServer" as SocketServer LIGHTGREEN {
+  component "Acceptor" as Acceptor
+  component "Processor Pool" as ProcessorPool
+}
+
+' 请求通道层
+package "RequestChannel" as RequestChannel LIGHTYELLOW {
+  component "Request Queue" as ReqQueue
+  component "Response Routing" as ResponseRouting
+}
+
+' 业务处理层
+package "Request Handlers" as Handlers LIGHTPINK {
+  component "Handler Pool" as HandlerPool
+  component "KafkaApis" as APIs
+}
+
+' 主要数据流
+Client --> Acceptor : 1. TCP 连接
+Acceptor --> ProcessorPool : 2. 分发连接
+ProcessorPool --> ReqQueue : 3. 发送请求
+ReqQueue --> HandlerPool : 4. 取出请求
+HandlerPool --> APIs : 5. 处理请求
+APIs --> ResponseRouting : 6. 发送响应
+ResponseRouting --> ProcessorPool : 7. 路由响应
+ProcessorPool --> Client : 8. 返回响应
+
+' 内部关系
+Acceptor .down.> ProcessorPool : 管理
+ResponseRouting .up.> ProcessorPool : 映射
+
+' 注释
+note right of Acceptor
+  负责接受新连接
+  每个监听器一个线程
+end note
+
+note right of ProcessorPool
+  N 个 Processor 线程
+  处理网络 I/O
+  支持动态扩展
+end note
+
+note bottom of ReqQueue
+  阻塞队列
+  缓冲待处理请求
+  支持背压机制
+end note
+
+note right of HandlerPool
+  M 个 Handler 线程
+  异步处理业务逻辑
+end note
+
+note bottom of ResponseRouting
+  根据 processor ID
+  精确路由响应
+end note
+
+' 性能指标
+component "Metrics" as Metrics
+Acceptor ..> Metrics : 连接指标
+ProcessorPool ..> Metrics : I/O 指标
+ReqQueue ..> Metrics : 队列指标
+HandlerPool ..> Metrics : 处理指标
+
+note right of Metrics
+  性能监控
+  - 连接数
+  - 队列大小
+  - 处理延迟
+  - 吞吐量
+end note
+
+@enduml

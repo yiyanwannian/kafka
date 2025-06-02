@@ -1,0 +1,302 @@
+@startuml Kafka MetadataImage 结构图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam classBackgroundColor #F8F9FA
+skinparam classBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+title Kafka MetadataImage 包含信息结构图
+
+' 为不同类型的组件设置不同的背景色
+skinparam class {
+    BackgroundColor<<core>> #E3F2FD
+    BackgroundColor<<cluster>> #E8F5E8
+    BackgroundColor<<topic>> #FFF3E0
+    BackgroundColor<<config>> #F1F8E9
+    BackgroundColor<<security>> #FCE4EC
+    BackgroundColor<<quota>> #E0F2F1
+    BackgroundColor<<feature>> #F3E5F5
+    BackgroundColor<<producer>> #FFEBEE
+    BackgroundColor<<provenance>> #EFEBE9
+}
+
+package "MetadataImage 核心结构" {
+    class MetadataImage <<core>> {
+        + provenance: MetadataProvenance
+        + features: FeaturesImage
+        + cluster: ClusterImage
+        + topics: TopicsImage
+        + configs: ConfigurationsImage
+        + clientQuotas: ClientQuotasImage
+        + producerIds: ProducerIdsImage
+        + acls: AclsImage
+        + scram: ScramImage
+        + delegationTokens: DelegationTokenImage
+        --
+        + isEmpty(): boolean
+        + offset(): long
+        + highestOffsetAndEpoch(): OffsetAndEpoch
+        + write(ImageWriter, ImageWriterOptions): void
+    }
+}
+
+package "元数据来源信息" {
+    class MetadataProvenance <<provenance>> {
+        - lastContainedOffset: long
+        - lastContainedEpoch: int
+        - lastContainedLogTimeMs: long
+        - isOffsetBatchAligned: boolean
+        --
+        + snapshotId(): OffsetAndEpoch
+        + snapshotName(): String
+    }
+}
+
+package "特性版本管理" {
+    class FeaturesImage <<feature>> {
+        - finalizedVersions: Map<String, Short>
+        - metadataVersion: Optional<MetadataVersion>
+        --
+        + metadataVersion(): Optional<MetadataVersion>
+        + isElrEnabled(): boolean
+    }
+    
+    note right of FeaturesImage
+        包含特性：
+        • metadata.version
+        • kraft.version
+        • eligible.leader.replicas
+        • group.version
+        • transaction.version
+    end note
+}
+
+package "集群拓扑信息" {
+    class ClusterImage <<cluster>> {
+        - brokers: Map<Integer, BrokerRegistration>
+        - controllers: Map<Integer, ControllerRegistration>
+        --
+        + broker(int): BrokerRegistration
+        + brokerEpoch(int): long
+    }
+    
+    class BrokerRegistration <<cluster>> {
+        - id: int
+        - epoch: long
+        - incarnationId: Uuid
+        - listeners: Map<String, Endpoint>
+        - supportedFeatures: Map<String, VersionRange>
+        - rack: Optional<String>
+        - fenced: boolean
+        - inControlledShutdown: boolean
+        - isMigratingZkBroker: boolean
+        - directories: List<Uuid>
+    }
+    
+    class ControllerRegistration <<cluster>> {
+        - id: int
+        - incarnationId: Uuid
+        - zkMigrationReady: boolean
+        - listeners: Map<String, Endpoint>
+        - supportedFeatures: Map<String, VersionRange>
+    }
+    
+    class Endpoint <<cluster>> {
+        - listenerName: String
+        - securityProtocol: SecurityProtocol
+        - host: String
+        - port: int
+    }
+}
+
+package "主题和分区信息" {
+    class TopicsImage <<topic>> {
+        - topicsById: ImmutableMap<Uuid, TopicImage>
+        - topicsByName: ImmutableMap<String, TopicImage>
+        --
+        + getTopic(Uuid): TopicImage
+        + getTopic(String): TopicImage
+        + getPartition(Uuid, int): PartitionRegistration
+    }
+    
+    class TopicImage <<topic>> {
+        - name: String
+        - id: Uuid
+        - partitions: Map<Integer, PartitionRegistration>
+    }
+    
+    class PartitionRegistration <<topic>> {
+        - replicas: int[]
+        - directories: Uuid[]
+        - isr: int[]
+        - removingReplicas: int[]
+        - addingReplicas: int[]
+        - elr: int[]
+        - lastKnownElr: int[]
+        - leader: Integer
+        - leaderRecoveryState: LeaderRecoveryState
+        - leaderEpoch: Integer
+        - partitionEpoch: Integer
+    }
+}
+
+package "配置管理" {
+    class ConfigurationsImage <<config>> {
+        - data: Map<ConfigResource, ConfigurationImage>
+        --
+        + configProperties(ConfigResource): Properties
+        + configMapForResource(ConfigResource): Map<String, String>
+    }
+    
+    class ConfigResource <<config>> {
+        - type: Type
+        - name: String
+    }
+    
+    class ConfigurationImage <<config>> {
+        - data: Map<String, String>
+        --
+        + toProperties(): Properties
+        + toMap(): Map<String, String>
+    }
+    
+    enum ConfigResourceType <<config>> {
+        BROKER
+        TOPIC
+        CLIENT_METRICS
+        USER
+        IP
+    }
+}
+
+package "安全认证组件" {
+    class AclsImage <<security>> {
+        - acls: Map<Uuid, StandardAcl>
+    }
+    
+    class StandardAcl <<security>> {
+        - resourceType: ResourceType
+        - resourceName: String
+        - principal: String
+        - operation: AclOperation
+        - permissionType: AclPermissionType
+        - host: String
+    }
+    
+    class ScramImage <<security>> {
+        - mechanisms: Map<ScramMechanism, Map<String, ScramCredentialData>>
+    }
+    
+    class ScramCredentialData <<security>> {
+        - salt: byte[]
+        - storedKey: byte[]
+        - serverKey: byte[]
+        - iterations: int
+    }
+    
+    class DelegationTokenImage <<security>> {
+        - tokens: Map<String, DelegationTokenData>
+    }
+    
+    class DelegationTokenData <<security>> {
+        - tokenId: String
+        - owner: String
+        - renewers: List<String>
+        - issueTimestamp: long
+        - expiryTimestamp: long
+        - maxTimestamp: long
+    }
+}
+
+package "配额管理" {
+    class ClientQuotasImage <<quota>> {
+        - entities: Map<ClientQuotaEntity, ClientQuotaImage>
+    }
+    
+    class ClientQuotaEntity <<quota>> {
+        - entries: Map<String, String>
+    }
+    
+    class ClientQuotaImage <<quota>> {
+        - values: Map<String, Double>
+    }
+    
+    note right of ClientQuotaImage
+        配额类型：
+        • producer_byte_rate
+        • consumer_byte_rate
+        • request_percentage
+        • controller_mutation_rate
+    end note
+}
+
+package "生产者ID管理" {
+    class ProducerIdsImage <<producer>> {
+        - nextProducerId: long
+        --
+        + nextProducerId(): long
+    }
+}
+
+' 关系定义 - 连接线颜色与目标组件背景色对应
+MetadataImage -[#EFEBE9]-> MetadataProvenance : 包含
+MetadataImage -[#F3E5F5]-> FeaturesImage : 包含
+MetadataImage -[#E8F5E8]-> ClusterImage : 包含
+MetadataImage -[#FFF3E0]-> TopicsImage : 包含
+MetadataImage -[#F1F8E9]-> ConfigurationsImage : 包含
+MetadataImage -[#E0F2F1]-> ClientQuotasImage : 包含
+MetadataImage -[#FFEBEE]-> ProducerIdsImage : 包含
+MetadataImage -[#FCE4EC]-> AclsImage : 包含
+MetadataImage -[#FCE4EC]-> ScramImage : 包含
+MetadataImage -[#FCE4EC]-> DelegationTokenImage : 包含
+
+ClusterImage -[#E8F5E8]-> BrokerRegistration : 包含多个
+ClusterImage -[#E8F5E8]-> ControllerRegistration : 包含多个
+BrokerRegistration -[#E8F5E8]-> Endpoint : 包含多个
+ControllerRegistration -[#E8F5E8]-> Endpoint : 包含多个
+
+TopicsImage -[#FFF3E0]-> TopicImage : 包含多个
+TopicImage -[#FFF3E0]-> PartitionRegistration : 包含多个
+
+ConfigurationsImage -[#F1F8E9]-> ConfigResource : 使用作为键
+ConfigurationsImage -[#F1F8E9]-> ConfigurationImage : 包含多个
+ConfigResource -[#F1F8E9]-> ConfigResourceType : 使用
+
+ClientQuotasImage -[#E0F2F1]-> ClientQuotaEntity : 使用作为键
+ClientQuotasImage -[#E0F2F1]-> ClientQuotaImage : 包含多个
+
+AclsImage -[#FCE4EC]-> StandardAcl : 包含多个
+ScramImage -[#FCE4EC]-> ScramCredentialData : 包含多个
+DelegationTokenImage -[#FCE4EC]-> DelegationTokenData : 包含多个
+
+' 数据量说明
+note as DataVolume
+    <b>典型数据量级：</b>
+    • Brokers: 10-1000个节点
+    • Topics: 100-10000个主题
+    • Partitions: 1000-100000个分区
+    • Configs: 100-1000个配置项
+    • ACLs: 10-1000个规则
+    • Users: 10-1000个用户
+    • Quotas: 10-100个配额规则
+end note
+
+' 存储大小说明
+note as StorageSize
+    <b>内存占用估算：</b>
+    • 小型集群: 1-10MB
+    • 中型集群: 10-100MB
+    • 大型集群: 100MB-1GB
+    • 超大集群: 1GB+
+    
+    <b>影响因素：</b>
+    • 主题和分区数量
+    • 配置项数量
+    • ACL规则复杂度
+    • 用户和配额数量
+end note
+
+@enduml

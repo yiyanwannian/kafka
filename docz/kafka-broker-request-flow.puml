@@ -1,0 +1,222 @@
+@startuml Kafka Broker 请求处理流程
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam participantBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+title Kafka Broker 请求处理完整流程
+
+participant "生产者客户端" as Producer
+participant "Acceptor线程" as Acceptor
+participant "Processor线程" as Processor
+participant "RequestChannel" as Channel
+participant "RequestHandler线程" as Handler
+participant "KafkaApis" as APIs
+participant "ReplicaManager" as ReplicaMgr
+participant "UnifiedLog" as Log
+participant "LogSegment" as Segment
+
+== 1. 连接建立阶段 ==
+
+Producer -> Acceptor: TCP 连接请求
+activate Acceptor
+note right: 源码位置：SocketServer.scala:604-623\nAcceptor.run() 方法
+
+Acceptor -> Acceptor: serverChannel.accept()
+note right: 接受新连接
+
+Acceptor -> Processor: 分发连接到 Processor
+activate Processor
+note right: 轮询方式分发到不同的 Processor 线程
+
+Processor -> Processor: configureNewConnections()
+note right: 配置新连接的 SelectionKey
+
+deactivate Acceptor
+
+== 2. 请求接收阶段 ==
+
+Producer -> Processor: ProduceRequest
+note right: 发送生产请求
+
+Processor -> Processor: poll()
+note right: 源码位置：SocketServer.scala:919-946\nProcessor.run() 方法
+
+Processor -> Processor: processCompletedReceives()
+note right: 处理完成接收的请求
+
+Processor -> Channel: sendRequest(request)
+activate Channel
+note right: 源码位置：RequestChannel.scala:342-359\n将请求放入队列
+
+Channel -> Channel: requestQueue.offer(request)
+note right: 请求入队等待处理
+
+== 3. 请求处理阶段 ==
+
+Handler -> Channel: receiveRequest(timeout)
+activate Handler
+note right: 源码位置：RequestChannel.scala\nreceiveRequest() 方法
+
+Channel -> Handler: 返回请求对象
+deactivate Channel
+
+Handler -> APIs: handle(request)
+activate APIs
+note right: 源码位置：KafkaApis.scala:89-107\n统一请求处理入口
+
+APIs -> APIs: request.header.apiKey match
+note right: 根据 API 类型路由请求
+
+alt 生产请求 (PRODUCE)
+    APIs -> APIs: handleProduceRequest(request)
+    note right: 处理生产请求
+
+    APIs -> ReplicaMgr: appendRecords(...)
+    activate ReplicaMgr
+    note right: 源码位置：ReplicaManager.scala:684-706\nappendRecords() 方法
+
+    ReplicaMgr -> ReplicaMgr: appendToLocalLog(...)
+    note right: 追加到本地日志
+
+    ReplicaMgr -> Log: appendAsLeader(...)
+    activate Log
+    note right: 源码位置：UnifiedLog.java\nappendAsLeader() 方法
+
+    Log -> Log: analyzeAndValidateRecords(...)
+    note right: 分析和验证记录
+
+    Log -> Segment: append(largestOffset, records)
+    activate Segment
+    note right: 源码位置：LogSegment.java:238-243\nappend() 方法
+
+    Segment -> Segment: log.append(records)
+    note right: 写入文件
+
+    Segment -> Segment: offsetIndex.append(...)
+    note right: 更新偏移量索引
+
+    Segment -> Log: 返回追加结果
+    deactivate Segment
+
+    Log -> ReplicaMgr: 返回日志追加信息
+    deactivate Log
+
+    ReplicaMgr -> ReplicaMgr: addCompletePurgatoryAction(...)
+    note right: 添加到延迟操作管理器
+
+    ReplicaMgr -> APIs: 返回追加结果
+    deactivate ReplicaMgr
+
+else 消费请求 (FETCH)
+    APIs -> APIs: handleFetchRequest(request)
+    note right: 处理消费请求
+
+    APIs -> ReplicaMgr: fetchMessages(...)
+    activate ReplicaMgr
+
+    ReplicaMgr -> Log: read(...)
+    activate Log
+
+    Log -> Segment: read(startOffset, maxSize)
+    activate Segment
+
+    Segment -> Segment: translateOffset(startOffset)
+    note right: 转换为物理偏移量
+
+    Segment -> Segment: log.slice(position, size)
+    note right: 读取数据片段
+
+    Segment -> Log: 返回读取结果
+    deactivate Segment
+
+    Log -> ReplicaMgr: 返回消息数据
+    deactivate Log
+
+    ReplicaMgr -> APIs: 返回获取结果
+    deactivate ReplicaMgr
+
+else 元数据请求 (METADATA)
+    APIs -> APIs: handleTopicMetadataRequest(request)
+    note right: 处理元数据请求
+
+    APIs -> APIs: metadataCache.getAllTopics()
+    note right: 从元数据缓存获取信息
+
+end
+
+== 4. 响应发送阶段 ==
+
+APIs -> APIs: 构建响应对象
+note right: 根据处理结果构建响应
+
+APIs -> Channel: sendResponse(request, response)
+activate Channel
+note right: 发送响应到通道
+
+Channel -> Channel: responseQueue.offer(response)
+note right: 响应入队
+
+Channel -> Processor: 通知有响应待发送
+deactivate Channel
+deactivate APIs
+deactivate Handler
+
+Processor -> Processor: processNewResponses()
+note right: 处理新响应
+
+Processor -> Processor: selector.send(response)
+note right: 通过 NIO Selector 发送
+
+Processor -> Producer: ProduceResponse
+deactivate Processor
+note right: 响应返回给客户端
+
+== 关键性能优化点 ==
+
+note over Producer, Segment
+    <b>性能优化特性：</b>
+    
+    <b>网络层优化：</b>
+    • 单个 Acceptor + 多个 Processor 的线程模型
+    • NIO 非阻塞 I/O，提高并发处理能力
+    • 请求/响应队列解耦，避免阻塞
+    
+    <b>存储层优化：</b>
+    • 顺序写入日志文件，充分利用磁盘性能
+    • 内存映射文件，减少系统调用开销
+    • 批量操作，提高吞吐量
+    
+    <b>索引优化：</b>
+    • 稀疏索引设计，平衡内存使用和查找效率
+    • 时间索引支持基于时间的快速查找
+    • 偏移量索引支持精确定位
+    
+    <b>并发控制：</b>
+    • 分区级别的锁，减少锁竞争
+    • 延迟操作管理器，异步处理副本确认
+    • 无锁数据结构，提高并发性能
+end note
+
+note over APIs, ReplicaMgr
+    <b>源码关键路径：</b>
+    
+    <b>请求路由：</b>
+    KafkaApis.handle() → 根据 ApiKeys 分发
+    
+    <b>生产路径：</b>
+    handleProduceRequest() → ReplicaManager.appendRecords()
+    → UnifiedLog.appendAsLeader() → LogSegment.append()
+    
+    <b>消费路径：</b>
+    handleFetchRequest() → ReplicaManager.fetchMessages()
+    → UnifiedLog.read() → LogSegment.read()
+    
+    <b>元数据路径：</b>
+    handleTopicMetadataRequest() → MetadataCache.getAllTopics()
+end note
+
+@enduml

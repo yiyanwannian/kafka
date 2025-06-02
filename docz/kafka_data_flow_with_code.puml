@@ -1,0 +1,300 @@
+@startuml Kafka Data Flow with Code Locations
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+title Kafka 数据流处理图 (含代码位置)
+
+actor "Producer Client" as PROD_CLIENT
+actor "Consumer Client" as CONS_CLIENT
+actor "Admin Client" as ADMIN_CLIENT
+
+box "Producer Flow" #LightBlue
+    participant "KafkaProducer" as KPROD
+    participant "ProducerInterceptors" as PI
+    participant "RecordAccumulator" as RA
+    participant "Sender" as SENDER
+end box
+
+box "Network Layer" #LightGreen
+    participant "SocketServer" as SS
+    participant "Acceptor" as ACC
+    participant "Processor" as PROC
+    participant "RequestChannel" as RC
+end box
+
+box "Request Processing" #LightYellow
+    participant "KafkaRequestHandler" as KRH
+    participant "KafkaApis" as APIS
+end box
+
+box "Storage & Replication" #LightCoral
+    participant "ReplicaManager" as RM
+    participant "LogManager" as LM
+    participant "UnifiedLog" as UL
+    participant "LogSegment" as LS
+end box
+
+box "Consumer Flow" #LightCyan
+    participant "KafkaConsumer" as KCONS
+    participant "ClassicKafkaConsumer" as CKC
+    participant "Fetcher" as FETCHER
+end box
+
+== Producer Data Flow ==
+
+PROD_CLIENT -> KPROD : send(ProducerRecord)
+note right
+  **代码位置**:
+  clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java
+  - doSend() 方法
+  - 序列化和分区
+end note
+
+KPROD -> PI : onSend(ProducerRecord)
+note right
+  **代码位置**:
+  clients/src/main/java/org/apache/kafka/clients/producer/internals/ProducerInterceptors.java
+  - 拦截器链处理
+end note
+
+KPROD -> RA : append(TopicPartition, Record)
+note right
+  **代码位置**:
+  clients/src/main/java/org/apache/kafka/clients/producer/internals/RecordAccumulator.java
+  - 批量累积记录
+  - 内存管理
+end note
+
+RA -> SENDER : sendProduceRequest()
+note right
+  **代码位置**:
+  clients/src/main/java/org/apache/kafka/clients/producer/internals/Sender.java
+  - 网络发送线程
+  - 批次发送
+end note
+
+SENDER -> SS : ProduceRequest
+note right
+  **网络传输**:
+  TCP连接到Broker
+end note
+
+== Network Processing ==
+
+SS -> ACC : accept()
+note right
+  **代码位置**:
+  core/src/main/scala/kafka/network/SocketServer.scala
+  - Acceptor内部类
+  - 单线程处理新连接
+end note
+
+ACC -> PROC : assign(SocketChannel)
+note right
+  **代码位置**:
+  SocketServer.scala - Processor内部类
+  - 多线程I/O处理
+  - NIO Selector
+end note
+
+PROC -> RC : sendRequest(Request)
+note right
+  **代码位置**:
+  core/src/main/scala/kafka/network/RequestChannel.scala
+  - 请求队列管理
+end note
+
+== Request Processing ==
+
+RC -> KRH : run()
+note right
+  **代码位置**:
+  core/src/main/scala/kafka/server/KafkaRequestHandler.scala
+  - 请求处理线程
+  - 从队列取请求
+end note
+
+KRH -> APIS : handle(Request)
+note right
+  **代码位置**:
+  core/src/main/scala/kafka/server/KafkaApis.scala
+  - handleProduceRequest()
+  - handleFetchRequest()
+  - 路由到具体处理方法
+end note
+
+== Storage Processing ==
+
+APIS -> RM : appendRecords()
+note right
+  **代码位置**:
+  core/src/main/scala/kafka/server/ReplicaManager.scala
+  - appendToLocalLog()
+  - 副本同步逻辑
+end note
+
+RM -> LM : appendAsLeader()
+note right
+  **代码位置**:
+  core/src/main/scala/kafka/log/LogManager.scala
+  - getOrCreateLog()
+  - 日志管理
+end note
+
+LM -> UL : appendAsLeader()
+note right
+  **代码位置**:
+  core/src/main/scala/kafka/log/UnifiedLog.scala
+  - append() 方法
+  - 日志追加逻辑
+end note
+
+UL -> LS : append()
+note right
+  **代码位置**:
+  core/src/main/scala/kafka/log/LogSegment.scala
+  - 物理文件写入
+  - 索引更新
+end note
+
+LS -> LS : flush()
+note right
+  **持久化**:
+  - 数据文件 (.log)
+  - 偏移量索引 (.index)
+  - 时间索引 (.timeindex)
+end note
+
+== Response Flow ==
+
+LS --> UL : LogAppendInfo
+UL --> LM : LogAppendInfo
+LM --> RM : LogAppendInfo
+RM --> APIS : ProduceResponse
+APIS --> RC : sendResponse()
+RC --> PROC : response
+PROC --> SENDER : ProduceResponse
+SENDER --> KPROD : RecordMetadata
+KPROD --> PROD_CLIENT : Future<RecordMetadata>
+
+== Consumer Data Flow ==
+
+CONS_CLIENT -> KCONS : poll(Duration)
+note right
+  **代码位置**:
+  clients/src/main/java/org/apache/kafka/clients/consumer/KafkaConsumer.java
+  - 委托给具体实现
+end note
+
+KCONS -> CKC : poll(Duration)
+note right
+  **代码位置**:
+  clients/src/main/java/org/apache/kafka/clients/consumer/internals/ClassicKafkaConsumer.java
+  - 经典消费者实现
+end note
+
+CKC -> FETCHER : fetchedRecords()
+note right
+  **代码位置**:
+  clients/src/main/java/org/apache/kafka/clients/consumer/internals/Fetcher.java
+  - 发送FetchRequest
+  - 处理FetchResponse
+end note
+
+FETCHER -> SS : FetchRequest
+note right
+  **网络请求**:
+  发送到Broker
+end note
+
+SS -> PROC : process()
+PROC -> RC : sendRequest()
+RC -> KRH : run()
+KRH -> APIS : handleFetchRequest()
+
+APIS -> RM : fetchMessages()
+note right
+  **代码位置**:
+  ReplicaManager.scala
+  - readFromLocalLog()
+  - 读取日志数据
+end note
+
+RM -> UL : read()
+note right
+  **代码位置**:
+  UnifiedLog.scala
+  - read() 方法
+  - 从日志段读取
+end note
+
+UL -> LS : read()
+note right
+  **代码位置**:
+  LogSegment.scala
+  - 从文件读取数据
+  - 使用索引定位
+end note
+
+LS --> UL : FetchDataInfo
+UL --> RM : FetchDataInfo
+RM --> APIS : FetchResponse
+APIS --> RC : sendResponse()
+RC --> PROC : response
+PROC --> FETCHER : FetchResponse
+FETCHER --> CKC : ConsumerRecords
+CKC --> KCONS : ConsumerRecords
+KCONS --> CONS_CLIENT : ConsumerRecords
+
+== Admin Operations ==
+
+ADMIN_CLIENT -> ADMIN_IF : createTopics()
+note right
+  **代码位置**:
+  clients/src/main/java/org/apache/kafka/clients/admin/Admin.java
+  - 管理API接口
+end note
+
+ADMIN_IF -> SS : CreateTopicsRequest
+SS -> PROC : process()
+PROC -> RC : sendRequest()
+RC -> KRH : run()
+KRH -> APIS : handleCreateTopicsRequest()
+
+APIS -> APIS : createTopic()
+note right
+  **代码位置**:
+  KafkaApis.scala
+  - 主题创建逻辑
+  - 元数据更新
+end note
+
+APIS --> RC : CreateTopicsResponse
+RC --> PROC : response
+PROC --> ADMIN_IF : CreateTopicsResponse
+ADMIN_IF --> ADMIN_CLIENT : CreateTopicsResult
+
+note over PROD_CLIENT, ADMIN_CLIENT
+  **关键代码路径总结**:
+  
+  **服务器端核心**:
+  - core/src/main/scala/kafka/Kafka.scala (入口)
+  - core/src/main/scala/kafka/server/KafkaRaftServer.scala (服务器)
+  - core/src/main/scala/kafka/network/SocketServer.scala (网络层)
+  - core/src/main/scala/kafka/server/KafkaApis.scala (API处理)
+  - core/src/main/scala/kafka/server/ReplicaManager.scala (副本管理)
+  - core/src/main/scala/kafka/log/LogManager.scala (日志管理)
+  
+  **客户端API**:
+  - clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java
+  - clients/src/main/java/org/apache/kafka/clients/consumer/KafkaConsumer.java
+  - clients/src/main/java/org/apache/kafka/clients/admin/Admin.java
+  
+  **流处理**:
+  - streams/src/main/java/org/apache/kafka/streams/KafkaStreams.java
+  
+  **连接器**:
+  - connect/api/src/main/java/org/apache/kafka/connect/connector/Connector.java
+end note
+
+@enduml

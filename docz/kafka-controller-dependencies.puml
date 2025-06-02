@@ -1,0 +1,213 @@
+@startuml Kafka控制器组件依赖关系图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam componentBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+' 为不同层次的组件设置不同的背景色
+skinparam component {
+    BackgroundColor<<core>> #E3F2FD
+    BackgroundColor<<network>> #E8F5E8
+    BackgroundColor<<metadata>> #FFF3E0
+    BackgroundColor<<security>> #FCE4EC
+    BackgroundColor<<monitoring>> #F3E5F5
+    BackgroundColor<<quota>> #E0F2F1
+    BackgroundColor<<publisher>> #FFF8E1
+    BackgroundColor<<registration>> #E1F5FE
+    BackgroundColor<<config>> #F1F8E9
+    BackgroundColor<<policy>> #FFEBEE
+    BackgroundColor<<fault>> #EFEBE9
+    BackgroundColor<<tool>> #FAFAFA
+}
+
+title Kafka控制器组件依赖关系图
+
+' 定义组件层次
+package "应用层" {
+    [ControllerServer] <<core>> as CS
+}
+
+package "核心控制层" {
+    [QuorumController] <<core>> as QC
+    [QuorumController.Builder] <<core>> as QCB
+    [ControllerApis] <<core>> as CAPI
+}
+
+package "网络通信层" {
+    [SocketServer] <<network>> as SS
+    [SimpleApiVersionManager] <<network>> as SAVM
+    [KafkaRequestHandlerPool] <<network>> as KRHP
+    [ListenerInfo] <<network>> as LI
+}
+
+package "元数据管理层" {
+    [KRaftMetadataCache] <<metadata>> as KMC
+    [KRaftMetadataCachePublisher] <<metadata>> as KMCP
+    [FeaturesPublisher] <<metadata>> as FP
+    [ControllerRegistrationsPublisher] <<metadata>> as CRP
+}
+
+package "安全认证层" {
+    [DelegationTokenCache] <<security>> as DTC
+    [CredentialProvider] <<security>> as CP
+    [Plugin<Authorizer>] <<security>> as PA
+}
+
+package "配额管理层" {
+    [QuotaManagers] <<quota>> as QM
+    [ClientQuotaMetadataManager] <<quota>> as CQMM
+}
+
+package "监控指标层" {
+    [LinuxIoMetricsCollector] <<monitoring>> as LIMC
+    [QuorumControllerMetrics] <<monitoring>> as QCM
+    [KafkaMetricsGroup] <<monitoring>> as KMG
+}
+
+package "发布器层" {
+    [DynamicConfigPublisher] <<publisher>> as DCP
+    [DynamicClientQuotaPublisher] <<publisher>> as DCQP
+    [DynamicTopicClusterQuotaPublisher] <<publisher>> as DTCQP
+    [ScramPublisher] <<publisher>> as SP
+    [DelegationTokenPublisher] <<publisher>> as DTP
+    [AclPublisher] <<publisher>> as AP
+    [ControllerMetadataMetricsPublisher] <<publisher>> as CMMP
+}
+
+package "注册管理层" {
+    [ControllerRegistrationManager] <<registration>> as CRM
+    [NodeToControllerChannelManagerImpl] <<registration>> as NTCCMI
+}
+
+package "配置管理层" {
+    [KafkaConfig] <<config>> as KC
+    [DynamicBrokerConfig] <<config>> as DBC
+    [BootstrapMetadata] <<config>> as BM
+    [KafkaConfigSchema] <<config>> as KCS
+}
+
+package "策略层" {
+    [CreateTopicPolicy] <<policy>> as CTP
+    [AlterConfigPolicy] <<policy>> as ACP
+    [ControllerConfigurationValidator] <<policy>> as CCV
+}
+
+package "故障处理层" {
+    [SharedServer] <<fault>> as SHS
+    [FaultHandler] <<fault>> as FH
+}
+
+package "工具层" {
+    [Deadline] <<tool>> as DL
+    [FutureUtils] <<tool>> as FU
+    [Utils] <<tool>> as UT
+}
+
+' 依赖关系定义 - 连接线颜色与目标组件背景色对应
+' ControllerServer的依赖
+CS -[#E3F2FD]-> QC : 创建和管理
+CS -[#F3E5F5]-> LIMC : 创建
+CS -[#FCE4EC]-> DTC : 创建
+CS -[#FCE4EC]-> CP : 创建
+CS -[#FFF3E0]-> KMC : 创建
+CS -[#FFF3E0]-> KMCP : 创建
+CS -[#FFF3E0]-> FP : 创建
+CS -[#FFF3E0]-> CRP : 创建
+CS -[#E8F5E8]-> SAVM : 创建
+CS -[#E8F5E8]-> SS : 创建
+CS -[#E3F2FD]-> CAPI : 创建
+CS -[#E8F5E8]-> KRHP : 创建
+CS -[#E0F2F1]-> QM : 创建
+CS -[#E0F2F1]-> CQMM : 创建
+CS -[#E1F5FE]-> CRM : 创建
+CS -[#F1F8E9]-> KC : 使用
+CS -[#F1F8E9]-> BM : 使用
+CS -[#F1F8E9]-> KCS : 使用
+CS -[#EFEBE9]-> SHS : 依赖
+
+' QuorumController的依赖
+QCB -[#E3F2FD]-> QC : 构建
+QC -[#F3E5F5]-> QCM : 使用
+QC -[#FFEBEE]-> CTP : 可选使用
+QC -[#FFEBEE]-> ACP : 可选使用
+QC -[#FFEBEE]-> CCV : 使用
+QC -[#EFEBE9]-> FH : 使用
+
+' 网络层依赖
+SS -[#FCE4EC]-> CP : 使用
+SS -[#E8F5E8]-> SAVM : 使用
+KRHP -[#E3F2FD]-> CAPI : 使用
+
+' 元数据层依赖
+KMCP -[#FFF3E0]-> KMC : 依赖
+
+' 安全层依赖
+CP -[#FCE4EC]-> DTC : 依赖
+
+' API层依赖
+CAPI -[#E0F2F1]-> QM : 使用
+CAPI -[#E3F2FD]-> QC : 使用
+CAPI -[#FFF3E0]-> KMC : 使用
+CAPI -[#FCE4EC]-> PA : 使用
+
+' 配额层依赖
+CQMM -[#E0F2F1]-> QM : 使用
+
+' 发布器层依赖
+DCQP -[#E0F2F1]-> CQMM : 使用
+DTCQP -[#E0F2F1]-> QM : 使用
+SP -[#FCE4EC]-> CP : 使用
+
+' 注册层依赖
+CRM -[#E1F5FE]-> NTCCMI : 使用
+
+' 配置层依赖
+KC -[#F1F8E9]-> DBC : 包含
+
+' 启动顺序标记
+note top of CS : 启动顺序：1\n主控制器，协调所有组件启动
+note right of LIMC : 启动顺序：2\n监控指标系统
+note right of DTC : 启动顺序：3\n安全认证组件
+note right of KMC : 启动顺序：4\n元数据管理系统
+note right of SS : 启动顺序：5\n网络服务
+note right of QC : 启动顺序：6\n控制器核心组件
+note right of CAPI : 启动顺序：7\n API处理器
+note right of DCP : 启动顺序：8\n元数据发布器
+note right of CRM : 启动顺序：9\n注册管理器
+
+' 组件分类说明
+note bottom of CS
+    <b>组件颜色分类：</b>
+    • <color:#E3F2FD>蓝色</color>：核心控制组件
+    • <color:#E8F5E8>绿色</color>：网络通信组件
+    • <color:#FFF3E0>橙色</color>：元数据管理组件
+    • <color:#FCE4EC>粉色</color>：安全认证组件
+    • <color:#F3E5F5>紫色</color>：监控指标组件
+    • <color:#E0F2F1>青色</color>：配额管理组件
+    • <color:#FFF8E1>黄色</color>：发布器组件
+    • <color:#E1F5FE>浅蓝</color>：注册管理组件
+
+    <b>连接线颜色：</b>
+    • 连接线颜色与目标组件背景色相同
+    • 便于快速识别依赖的目标组件类型
+
+    <b>启动原则：</b>
+    • 被依赖的组件先启动
+    • 同层组件可并行启动
+    • 异常时逆序关闭
+end note
+
+' 关键路径标记
+note as KeyPath
+    <b>关键启动路径：</b>
+    1. ControllerServer → 状态管理
+    2. 监控系统 → 安全组件
+    3. 元数据系统 → 网络服务
+    4. QuorumController → API处理
+    5. 发布器注册 → 服务同步
+end note
+
+@enduml

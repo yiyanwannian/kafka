@@ -1,0 +1,169 @@
+@startuml Kafka元数据管理系统架构图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam componentBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+' 为不同层次的组件设置不同的背景色
+skinparam component {
+    BackgroundColor<<controller>> #E3F2FD
+    BackgroundColor<<metadata>> #FFF3E0
+    BackgroundColor<<cache>> #E8F5E8
+    BackgroundColor<<publisher>> #FFF8E1
+    BackgroundColor<<raft>> #FCE4EC
+    BackgroundColor<<storage>> #F3E5F5
+    BackgroundColor<<network>> #E0F2F1
+}
+
+title Kafka 元数据管理系统架构图
+
+package "Controller 层" {
+    [QuorumController] <<controller>> as QC
+    [ControllerApis] <<controller>> as CAPI
+    [ReplicationControlManager] <<controller>> as RCM
+    [ClusterControlManager] <<controller>> as CCM
+    [ConfigurationControlManager] <<controller>> as CFGM
+}
+
+package "Raft 共识层" {
+    [KafkaRaftClient] <<raft>> as KRC
+    [QuorumState] <<raft>> as QS
+    [RaftManager] <<raft>> as RM
+    [KRaftControlRecordStateMachine] <<raft>> as KCRSM
+}
+
+package "元数据存储层" {
+    [MetadataImage] <<metadata>> as MI
+    [MetadataDelta] <<metadata>> as MD
+    [MetadataProvenance] <<metadata>> as MP
+    [FeaturesImage] <<metadata>> as FI
+    [ClusterImage] <<metadata>> as CI
+    [TopicsImage] <<metadata>> as TI
+    [ConfigurationsImage] <<metadata>> as CFI
+}
+
+package "元数据加载层" {
+    [MetadataLoader] <<storage>> as ML
+    [MetadataBatchLoader] <<storage>> as MBL
+    [SnapshotReader] <<storage>> as SR
+    [LogDeltaManifest] <<storage>> as LDM
+}
+
+package "发布器层" {
+    [MetadataPublisher] <<publisher>> as MPub
+    [KRaftMetadataCachePublisher] <<publisher>> as KMCP
+    [FeaturesPublisher] <<publisher>> as FP
+    [BrokerMetadataPublisher] <<publisher>> as BMP
+    [DynamicConfigPublisher] <<publisher>> as DCP
+}
+
+package "缓存层" {
+    [KRaftMetadataCache] <<cache>> as KMC
+    [MetadataCache] <<cache>> as MC
+}
+
+package "网络通信层" {
+    [SocketServer] <<network>> as SS
+    [RequestChannel] <<network>> as RC
+    [KafkaApis] <<network>> as KAPI
+}
+
+' 核心依赖关系 - 连接线颜色与目标组件背景色对应
+' Controller 层依赖
+QC -[#FCE4EC]-> KRC : 使用 Raft 客户端
+QC -[#FFF3E0]-> MI : 维护当前镜像
+QC -[#FFF3E0]-> MD : 应用增量变更
+CAPI -[#E3F2FD]-> QC : 调用控制器方法
+RCM -[#E3F2FD]-> QC : 副本管理
+CCM -[#E3F2FD]-> QC : 集群管理
+CFGM -[#E3F2FD]-> QC : 配置管理
+
+' Raft 层依赖
+KRC -[#FCE4EC]-> QS : 状态管理
+KRC -[#FCE4EC]-> KCRSM : 状态机
+RM -[#FCE4EC]-> KRC : 管理客户端
+
+' 元数据层依赖
+MI -[#FFF3E0]-> MP : 版本信息
+MI -[#FFF3E0]-> FI : 特性镜像
+MI -[#FFF3E0]-> CI : 集群镜像
+MI -[#FFF3E0]-> TI : 主题镜像
+MI -[#FFF3E0]-> CFI : 配置镜像
+MD -[#FFF3E0]-> MI : 基于镜像创建
+
+' 加载层依赖
+ML -[#F3E5F5]-> MBL : 批量加载器
+ML -[#F3E5F5]-> SR : 快照读取
+ML -[#F3E5F5]-> LDM : 日志清单
+MBL -[#FFF3E0]-> MD : 创建增量
+MBL -[#FFF3E0]-> MI : 应用镜像
+
+' 发布器层依赖
+ML -[#FFF8E1]-> MPub : 通知发布器
+KMCP -[#FFF8E1]-> MPub : 实现接口
+FP -[#FFF8E1]-> MPub : 实现接口
+BMP -[#FFF8E1]-> MPub : 实现接口
+DCP -[#FFF8E1]-> MPub : 实现接口
+
+' 缓存层依赖
+KMCP -[#E8F5E8]-> KMC : 更新缓存
+KMC -[#E8F5E8]-> MC : 实现接口
+KMC -[#FFF3E0]-> MI : 存储镜像
+
+' 网络层依赖
+SS -[#E0F2F1]-> RC : 请求通道
+RC -[#E0F2F1]-> KAPI : API处理
+KAPI -[#E8F5E8]-> KMC : 查询元数据
+KAPI -[#E3F2FD]-> CAPI : 控制器API
+
+' 数据流向
+QC -[#FFF3E0]-> ML : 元数据变更
+ML -[#FFF8E1]-> KMCP : 发布更新
+KMCP -[#E8F5E8]-> KMC : 更新缓存
+
+' 关键路径标记
+note as MetadataFlow
+    <b>元数据流转路径：</b>
+    1. Controller 处理请求生成元数据记录
+    2. 通过 Raft 协议复制到集群
+    3. MetadataLoader 加载并应用变更
+    4. 通过 Publisher 广播到各个组件
+    5. 更新本地 MetadataCache 供查询使用
+end note
+
+note as RaftConsensus
+    <b>Raft 共识机制：</b>
+    1. Leader 选举确保单一写入点
+    2. 日志复制保证数据一致性
+    3. 快照机制优化存储和恢复
+    4. 故障检测和自动恢复
+end note
+
+note as CacheDesign
+    <b>缓存设计特点：</b>
+    1. 不可变 MetadataImage 确保线程安全
+    2. 原子更新避免中间状态
+    3. 无锁读取提供高并发性能
+    4. 版本追踪支持一致性检查
+end note
+
+' 组件分类说明
+note bottom of QC
+    <b>组件颜色分类：</b>
+    • <color:#E3F2FD>蓝色</color>：Controller 控制组件
+    • <color:#FFF3E0>橙色</color>：元数据核心组件
+    • <color:#E8F5E8>绿色</color>：缓存组件
+    • <color:#FFF8E1>黄色</color>：发布器组件
+    • <color:#FCE4EC>粉色</color>：Raft 共识组件
+    • <color:#F3E5F5>紫色</color>：存储加载组件
+    • <color:#E0F2F1>青色</color>：网络通信组件
+
+    <b>连接线颜色：</b>
+    • 连接线颜色与目标组件背景色相同
+    • 便于快速识别依赖的目标组件类型
+end note
+
+@enduml

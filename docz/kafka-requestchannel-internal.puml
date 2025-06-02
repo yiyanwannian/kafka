@@ -1,0 +1,210 @@
+@startuml RequestChannel 内部结构详图
+
+!define LIGHTBLUE #E1F5FE
+!define LIGHTGREEN #E8F5E8
+!define LIGHTYELLOW #FFF9C4
+!define LIGHTPINK #FCE4EC
+!define LIGHTGRAY #F5F5F5
+!define LIGHTCYAN #E0F7FA
+
+title RequestChannel 内部结构和数据流
+
+package "RequestChannel 核心组件" as RCCore LIGHTBLUE {
+
+  class RequestChannel {
+    -queueSize: Int
+    -time: Time
+    -metrics: RequestChannelMetrics
+    -metricsGroup: KafkaMetricsGroup
+    --
+    -requestQueue: ArrayBlockingQueue[BaseRequest]
+    -processors: ConcurrentHashMap[Int, Processor]
+    -callbackQueue: ArrayBlockingQueue[BaseRequest]
+    --
+    +sendRequest(request: Request): Unit
+    +receiveRequest(): BaseRequest
+    +receiveRequest(timeout: Long): BaseRequest
+    +sendResponse(response: Response): Unit
+    +addProcessor(processor: Processor): Unit
+    +removeProcessor(processorId: Int): Unit
+  }
+
+  component "Request Queue" as ReqQueue
+  note right of ReqQueue
+    ArrayBlockingQueue[BaseRequest]
+    - Request-1, Request-2, Request-N
+    - ShutdownRequest
+    - WakeupRequest
+  end note
+
+  component "Callback Queue" as CallbackQueue
+  note right of CallbackQueue
+    ArrayBlockingQueue[BaseRequest]
+    - CallbackRequest-1
+    - CallbackRequest-2
+    - CallbackRequest-N
+  end note
+
+  component "Processors Map" as ProcessorMap
+  note right of ProcessorMap
+    ConcurrentHashMap[Int, Processor]
+    - 0 => Processor-0
+    - 1 => Processor-1
+    - N => Processor-N
+  end note
+}
+
+package "请求类型层次" as RequestHierarchy LIGHTGRAY {
+  
+  interface BaseRequest LIGHTCYAN
+  
+  class Request {
+    +processor: Int
+    +context: RequestContext
+    +startTimeNanos: Long
+    +memoryPool: MemoryPool
+    +buffer: ByteBuffer
+    +metrics: RequestChannelMetrics
+    +envelope: Option[Request]
+    --
+    +requestDequeueTimeNanos: Long
+    +apiLocalCompleteTimeNanos: Long
+    +responseCompleteTimeNanos: Long
+    +responseDequeueTimeNanos: Long
+    +messageConversionsTimeNanos: Long
+    +apiThrottleTimeMs: Long
+    +temporaryMemoryBytes: Long
+    --
+    +body[T](): T
+    +buildResponseSend(): Send
+    +updateRequestMetrics(): Unit
+    +releaseBuffer(): Unit
+  }
+  
+  class CallbackRequest {
+    +fun: RequestLocal => Unit
+    +originalRequest: Request
+  }
+  
+  object ShutdownRequest
+  object WakeupRequest
+  
+  BaseRequest <|-- Request
+  BaseRequest <|-- CallbackRequest
+  BaseRequest <|-- ShutdownRequest
+  BaseRequest <|-- WakeupRequest
+}
+
+package "响应类型层次" as ResponseHierarchy LIGHTCYAN {
+  
+  abstract class Response {
+    +request: Request
+    +processor: Int
+    +responseLog: Option[JsonNode]
+    +onComplete: Option[Send => Unit]
+  }
+  
+  class SendResponse {
+    +responseSend: Send
+    +responseLogValue: Option[JsonNode]
+    +onCompleteCallback: Option[Send => Unit]
+  }
+  
+  class NoOpResponse
+  class CloseConnectionResponse
+  class StartThrottlingResponse
+  class EndThrottlingResponse
+  
+  Response <|-- SendResponse
+  Response <|-- NoOpResponse
+  Response <|-- CloseConnectionResponse
+  Response <|-- StartThrottlingResponse
+  Response <|-- EndThrottlingResponse
+}
+
+package "Processor 响应队列" as ProcessorQueues LIGHTPINK {
+
+  component "Processor-0 Response Queue" as P0Queue
+  note bottom of P0Queue
+    ArrayBlockingQueue[Response]
+    - Response-1, Response-2
+  end note
+
+  component "Processor-1 Response Queue" as P1Queue
+  note bottom of P1Queue
+    ArrayBlockingQueue[Response]
+    - Response-3, Response-4
+  end note
+
+  component "Processor-N Response Queue" as PNQueue
+  note bottom of PNQueue
+    ArrayBlockingQueue[Response]
+    - Response-5, Response-6
+  end note
+}
+
+package "监控指标" as Metrics LIGHTYELLOW {
+  
+  class RequestChannelMetrics {
+    +requestRate: Meter
+    +requestQueueTimeHist: Histogram
+    +localTimeHist: Histogram
+    +remoteTimeHist: Histogram
+    +throttleTimeHist: Histogram
+    +responseQueueTimeHist: Histogram
+    +responseSendTimeHist: Histogram
+    +totalTimeHist: Histogram
+    +requestBytesHist: Histogram
+  }
+  
+  component "Gauge Metrics" as GaugeMetrics
+  note bottom of GaugeMetrics
+    实时监控指标
+    - RequestQueueSize
+    - ResponseQueueSize
+    - Processor-0-ResponseQueueSize
+    - Processor-1-ResponseQueueSize
+    - Processor-N-ResponseQueueSize
+  end note
+}
+
+' 关系连接
+RequestChannel *-- ReqQueue : 包含
+RequestChannel *-- CallbackQueue : 包含
+RequestChannel *-- ProcessorMap : 包含
+RequestChannel --> RequestChannelMetrics : 使用
+
+ReqQueue --> Request : 存储
+ReqQueue --> ShutdownRequest : 存储
+ReqQueue --> WakeupRequest : 存储
+CallbackQueue --> CallbackRequest : 存储
+
+ProcessorMap --> P0Queue : 映射
+ProcessorMap --> P1Queue : 映射
+ProcessorMap --> PNQueue : 映射
+
+P0Queue --> SendResponse : 存储
+P1Queue --> NoOpResponse : 存储
+PNQueue --> CloseConnectionResponse : 存储
+
+RequestChannelMetrics --> GaugeMetrics : 生成
+
+' 数据流箭头
+Request -[#blue,bold]-> ReqQueue : sendRequest()
+CallbackRequest -[#green,bold]-> CallbackQueue : sendCallbackRequest()
+
+ReqQueue -[#blue,bold]-> Request : receiveRequest()
+CallbackQueue -[#green,bold]-> CallbackRequest : receiveRequest()
+
+SendResponse -[#red,bold]-> ProcessorMap : sendResponse()
+ProcessorMap -[#red,bold]-> P0Queue : enqueueResponse()
+
+note top of ReqQueue : 阻塞队列，容量由 queueSize 控制\n支持超时和非阻塞操作
+note top of CallbackQueue : 优先级队列，回调请求优先处理\n用于延迟处理和异步回调
+note top of ProcessorMap : 线程安全的映射表\n根据 processor ID 路由响应
+note bottom of RequestChannelMetrics : 详细的性能监控指标\n包含延迟、吞吐量、错误率等
+
+note right of Request : 包含完整的请求上下文\n支持内存管理和性能追踪
+note right of Response : 多种响应类型支持\n不同的网络处理策略
+
+@enduml

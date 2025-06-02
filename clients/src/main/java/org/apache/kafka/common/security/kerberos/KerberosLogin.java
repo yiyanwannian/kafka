@@ -46,6 +46,8 @@ import javax.security.auth.login.LoginException;
 /**
  * This class is responsible for refreshing Kerberos credentials for
  * logins for both Kafka client and server.
+ * 负责为 Kafka 客户端和服务端刷新 Kerberos 凭证（即定期自动续签 Kerberos 票据）。
+ * 这有助于保证 Kafka 在使用 Kerberos 认证时，能够持续保持有效的认证状态，无需人工干预。
  */
 public class KerberosLogin extends AbstractLogin {
     private static final Logger log = LoggerFactory.getLogger(KerberosLogin.class);

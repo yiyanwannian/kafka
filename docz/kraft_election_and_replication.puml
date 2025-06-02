@@ -1,0 +1,279 @@
+@startuml KRaft Election and Log Replication
+!theme plain
+skinparam backgroundColor #FDFDFD
+
+autonumber
+
+title KRaft 选举和日志复制时序图
+
+participant "Node A\n(Candidate)" as A
+participant "Node B\n(Voter)" as B  
+participant "Node C\n(Voter)" as C
+participant "Client" as CLIENT
+
+== 选举阶段 ==
+
+note over A, C
+  **选举触发**: Node A 检测到选举超时
+  代码: QuorumState.hasElectionTimeoutExpired()
+end note
+
+A -> A : transitionToProspective()
+note right of A
+  **PreVote阶段开始**
+  - 不增加epoch
+  - 测试是否有机会获胜
+  
+  **代码位置**:
+  KafkaRaftClient.transitionToProspective()
+end note
+
+A -> B : VoteRequest(preVote=true, epoch=N)
+A -> C : VoteRequest(preVote=true, epoch=N)
+
+note over B
+  **投票决策逻辑**:
+  1. 检查候选者日志是否足够新
+  2. 检查是否已投票给其他候选者
+  3. PreVote不会更新投票状态
+  
+  **代码**: QuorumState.canGrantVote()
+end note
+
+B -> A : VoteResponse(voteGranted=true)
+C -> A : VoteResponse(voteGranted=true)
+
+A -> A : recordGrantedVote()
+note right of A
+  **PreVote成功**
+  获得多数派PreVote
+  
+  **代码**:
+  ProspectiveState.recordGrantedVote()
+  epochElection.isVoteGranted()
+end note
+
+A -> A : transitionToCandidate()
+note right of A
+  **正式选举开始**
+  - epoch = N + 1
+  - 持久化选举状态
+  
+  **代码**:
+  QuorumState.transitionToCandidate()
+  durableTransitionTo(CandidateState)
+end note
+
+A -> B : VoteRequest(preVote=false, epoch=N+1)
+A -> C : VoteRequest(preVote=false, epoch=N+1)
+
+note over B
+  **正式投票**:
+  1. 验证epoch > 当前epoch
+  2. 检查日志新旧程度
+  3. 更新投票状态到磁盘
+  
+  **代码**:
+  handleVoteRequest()
+  transitionToVoted()
+end note
+
+B -> A : VoteResponse(voteGranted=true)
+C -> A : VoteResponse(voteGranted=true)
+
+A -> A : becomeLeader()
+note right of A
+  **成为Leader**:
+  1. 创建BatchAccumulator
+  2. 初始化Leader epoch
+  3. 写入控制消息
+  4. 重置网络连接
+  
+  **代码**:
+  QuorumState.transitionToLeader()
+  onBecomeLeader()
+end note
+
+A -> B : BeginQuorumEpochRequest(epoch=N+1)
+A -> C : BeginQuorumEpochRequest(epoch=N+1)
+
+B -> B : transitionToFollower()
+C -> C : transitionToFollower()
+
+B -> A : BeginQuorumEpochResponse(success)
+C -> A : BeginQuorumEpochResponse(success)
+
+== 日志复制阶段 ==
+
+CLIENT -> A : Write Request
+note right of A
+  **Leader处理写请求**:
+  1. 追加到BatchAccumulator
+  2. 分配偏移量和epoch
+  
+  **代码**:
+  LeaderState.appendStartOfEpochControlRecords()
+  BatchAccumulator.append()
+end note
+
+A -> A : maybeAppendBatches()
+note right of A
+  **批量刷新**:
+  1. 检查是否需要刷新
+  2. 写入本地日志
+  3. 更新本地状态
+  
+  **代码**:
+  LeaderState.maybeAppendBatches()
+  log.appendAsLeader()
+end note
+
+B -> A : FetchRequest(fetchOffset=X)
+C -> A : FetchRequest(fetchOffset=Y)
+
+note over A
+  **处理Fetch请求**:
+  1. 验证fetchOffset和epoch
+  2. 读取日志数据
+  3. 更新副本状态
+  4. 计算新的高水位
+  
+  **代码**:
+  handleLeaderFetchRequest()
+  LeaderState.updateReplicaState()
+  maybeUpdateHighWatermark()
+end note
+
+A -> A : updateReplicaState(B, fetchOffset)
+A -> A : updateReplicaState(C, fetchOffset)
+A -> A : maybeUpdateHighWatermark()
+
+note right of A
+  **高水位计算**:
+  1. 获取所有副本的复制进度
+  2. 按偏移量降序排序
+  3. 取中位数作为新高水位
+  
+  **代码**:
+  LeaderState.followersByDescendingFetchOffset()
+  计算多数派已复制的偏移量
+end note
+
+A -> B : FetchResponse(records, highWatermark=Z)
+A -> C : FetchResponse(records, highWatermark=Z)
+
+B -> B : appendAsFollower(records)
+C -> C : appendAsFollower(records)
+
+note over B, C
+  **Follower处理**:
+  1. 追加日志到本地
+  2. 更新高水位
+  3. 通知状态机提交
+  
+  **代码**:
+  log.appendAsFollower()
+  updateFollowerHighWatermark()
+  maybeFireHandleCommit()
+end note
+
+B -> B : maybeFireHandleCommit()
+C -> C : maybeFireHandleCommit()
+
+A -> CLIENT : Write Response(success)
+
+== 快照处理 ==
+
+note over A
+  **快照触发条件**:
+  - 日志大小超过阈值
+  - 定期快照策略
+  
+  **代码**:
+  log.maybeClean()
+end note
+
+A -> A : createSnapshot()
+note right of A
+  **创建快照**:
+  1. 创建RecordsSnapshotWriter
+  2. 写入状态机数据
+  3. 冻结快照
+  
+  **代码**:
+  RecordsSnapshotWriter.append()
+  RecordsSnapshotWriter.freeze()
+end note
+
+B -> A : FetchSnapshotRequest(snapshotId)
+
+A -> B : FetchSnapshotResponse(snapshotData)
+
+B -> B : downloadSnapshot()
+note right of B
+  **下载快照**:
+  1. 分块下载快照数据
+  2. 验证快照完整性
+  3. 截断日志到快照点
+  4. 重新加载状态机
+  
+  **代码**:
+  handleFetchSnapshotResponse()
+  log.truncateToLatestSnapshot()
+end note
+
+== 故障处理 ==
+
+note over A, C
+  **Leader失效场景**
+end note
+
+A -x B : 网络分区
+A -x C : 网络分区
+
+B -> B : fetchTimeoutExpired()
+C -> C : fetchTimeoutExpired()
+
+note over B, C
+  **检测Leader失效**:
+  - Fetch请求超时
+  - 没有收到心跳
+  
+  **代码**:
+  FollowerState.hasFetchTimeoutExpired()
+end note
+
+B -> B : transitionToProspective()
+C -> C : transitionToProspective()
+
+B -> C : VoteRequest(preVote=true, epoch=N+1)
+C -> B : VoteRequest(preVote=true, epoch=N+1)
+
+note over B, C
+  **新一轮选举开始**
+  重复选举流程...
+end note
+
+note over A, C
+  **关键代码路径总结**:
+  
+  **选举相关**:
+  - QuorumState.transitionToProspective/Candidate/Leader()
+  - KafkaRaftClient.handleVoteRequest/Response()
+  - EpochElection.recordVote()
+  
+  **日志复制**:
+  - KafkaRaftClient.handleFetchRequest/Response()
+  - LeaderState.updateReplicaState()
+  - LeaderState.maybeUpdateHighWatermark()
+  
+  **状态持久化**:
+  - QuorumState.durableTransitionTo()
+  - FileQuorumStateStore.writeElectionState()
+  
+  **快照机制**:
+  - RecordsSnapshotWriter.append/freeze()
+  - KafkaRaftClient.handleFetchSnapshotRequest()
+end note
+
+@enduml

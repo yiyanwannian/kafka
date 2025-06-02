@@ -1,0 +1,46 @@
+@startuml Kafka SocketServer 极简架构
+
+title Kafka SocketServer 极简架构图
+
+skinparam componentStyle rectangle
+skinparam backgroundColor white
+skinparam shadowing false
+
+' 三层架构
+package "网络层" {
+  component SocketServer
+}
+
+package "通道层" {
+  component RequestChannel
+}
+
+package "业务层" {
+  component KafkaApis
+}
+
+' 外部
+actor Client
+
+' 连接关系
+Client <--> SocketServer : 网络 I/O
+SocketServer <--> RequestChannel : 请求/响应
+RequestChannel <--> KafkaApis : 业务处理
+
+' 简要说明
+note right of SocketServer
+  - Acceptor: 接受连接
+  - Processor: 处理 I/O
+end note
+
+note right of RequestChannel
+  - Request Queue: 请求队列
+  - Response Routing: 响应路由
+end note
+
+note right of KafkaApis
+  - Handler Pool: 处理线程池
+  - Business Logic: 业务逻辑
+end note
+
+@enduml

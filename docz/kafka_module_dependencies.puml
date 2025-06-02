@@ -1,0 +1,365 @@
+@startuml Kafka Module Dependencies with Code Paths
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam packageStyle rectangle
+
+title Kafka 模块依赖关系图 (含代码路径)
+
+package "Core Server Modules" {
+    
+    package "core/" {
+        package "kafka.server" {
+            class "Kafka.scala" as MAIN {
+                + main(args: Array[String])
+                + buildServer(props: Properties): Server
+                --
+                **路径**: core/src/main/scala/kafka/Kafka.scala
+                **功能**: 服务器启动入口
+            }
+            
+            class "KafkaRaftServer.scala" as KRS {
+                + startup(): Unit
+                + shutdown(): Unit
+                --
+                **路径**: core/src/main/scala/kafka/server/KafkaRaftServer.scala
+                **功能**: KRaft模式服务器
+            }
+            
+            class "BrokerServer.scala" as BS {
+                + startup(): Unit
+                + replicaManager: ReplicaManager
+                + logManager: LogManager
+                --
+                **路径**: core/src/main/scala/kafka/server/BrokerServer.scala
+                **功能**: Broker实现
+            }
+            
+            class "KafkaApis.scala" as APIS {
+                + handle(request: RequestChannel.Request)
+                + handleProduceRequest()
+                + handleFetchRequest()
+                --
+                **路径**: core/src/main/scala/kafka/server/KafkaApis.scala
+                **功能**: API请求处理
+            }
+            
+            class "ReplicaManager.scala" as RM {
+                + appendRecords()
+                + fetchMessages()
+                + becomeLeaderOrFollower()
+                --
+                **路径**: core/src/main/scala/kafka/server/ReplicaManager.scala
+                **功能**: 副本管理
+            }
+        }
+        
+        package "kafka.network" {
+            class "SocketServer.scala" as SS {
+                + startup(): Unit
+                + acceptor: Acceptor
+                + processors: Array[Processor]
+                --
+                **路径**: core/src/main/scala/kafka/network/SocketServer.scala
+                **功能**: 网络层处理
+            }
+            
+            class "RequestChannel.scala" as RC {
+                + sendRequest(request: Request)
+                + receiveRequest(): Request
+                --
+                **路径**: core/src/main/scala/kafka/network/RequestChannel.scala
+                **功能**: 请求通道
+            }
+        }
+        
+        package "kafka.log" {
+            class "LogManager.scala" as LM {
+                + createLog()
+                + getOrCreateLog()
+                + cleanupLogs()
+                --
+                **路径**: core/src/main/scala/kafka/log/LogManager.scala
+                **功能**: 日志管理
+            }
+            
+            class "UnifiedLog.scala" as UL {
+                + append()
+                + read()
+                + roll()
+                --
+                **路径**: core/src/main/scala/kafka/log/UnifiedLog.scala
+                **功能**: 统一日志
+            }
+            
+            class "LogSegment.scala" as LS {
+                + append()
+                + read()
+                + flush()
+                --
+                **路径**: core/src/main/scala/kafka/log/LogSegment.scala
+                **功能**: 日志段
+            }
+        }
+        
+        package "kafka.coordinator" {
+            class "GroupCoordinator" as GC {
+                + handleJoinGroup()
+                + handleSyncGroup()
+                + handleLeaveGroup()
+                --
+                **路径**: org.apache.kafka.coordinator.group.GroupCoordinator
+                **功能**: 消费者组协调
+            }
+            
+            class "TransactionCoordinator.scala" as TC {
+                + handleInitProducerId()
+                + handleAddPartitionsToTxn()
+                --
+                **路径**: core/src/main/scala/kafka/coordinator/transaction/TransactionCoordinator.scala
+                **功能**: 事务协调
+            }
+        }
+    }
+    
+    package "raft/" {
+        class "KafkaRaftClient.java" as KRC {
+            + initialize()
+            + poll()
+            + scheduleAppend()
+            --
+            **路径**: raft/src/main/java/org/apache/kafka/raft/KafkaRaftClient.java
+            **功能**: Raft协议客户端
+        }
+        
+        class "RaftManager.scala" as RAFTM {
+            + startup()
+            + client: KafkaRaftClient
+            --
+            **路径**: core/src/main/scala/kafka/raft/RaftManager.scala
+            **功能**: Raft管理器
+        }
+    }
+}
+
+package "Client API Modules" {
+    
+    package "clients/" {
+        package "org.apache.kafka.clients.producer" {
+            class "KafkaProducer.java" as KPROD {
+                + send(record: ProducerRecord)
+                + flush()
+                + close()
+                --
+                **路径**: clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java
+                **功能**: 生产者API
+            }
+            
+            class "ProducerInterceptors.java" as PI {
+                + onSend()
+                + onAcknowledgement()
+                --
+                **路径**: clients/src/main/java/org/apache/kafka/clients/producer/internals/ProducerInterceptors.java
+                **功能**: 生产者拦截器
+            }
+            
+            class "RecordAccumulator.java" as RA {
+                + append()
+                + drain()
+                + ready()
+                --
+                **路径**: clients/src/main/java/org/apache/kafka/clients/producer/internals/RecordAccumulator.java
+                **功能**: 记录累加器
+            }
+        }
+        
+        package "org.apache.kafka.clients.consumer" {
+            class "KafkaConsumer.java" as KCONS {
+                + subscribe()
+                + poll()
+                + commitSync()
+                --
+                **路径**: clients/src/main/java/org/apache/kafka/clients/consumer/KafkaConsumer.java
+                **功能**: 消费者API
+            }
+            
+            class "ClassicKafkaConsumer.java" as CKC {
+                + poll()
+                + subscribe()
+                + assign()
+                --
+                **路径**: clients/src/main/java/org/apache/kafka/clients/consumer/internals/ClassicKafkaConsumer.java
+                **功能**: 经典消费者实现
+            }
+            
+            class "AsyncKafkaConsumer.java" as AKC {
+                + poll()
+                + subscribe()
+                + assign()
+                --
+                **路径**: clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java
+                **功能**: 异步消费者实现
+            }
+            
+            class "ConsumerDelegateCreator.java" as CDC {
+                + create()
+                --
+                **路径**: clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerDelegateCreator.java
+                **功能**: 消费者委托创建器
+            }
+        }
+        
+        package "org.apache.kafka.clients.admin" {
+            class "Admin.java" as ADMIN_IF {
+                + createTopics()
+                + deleteTopics()
+                + describeCluster()
+                --
+                **路径**: clients/src/main/java/org/apache/kafka/clients/admin/Admin.java
+                **功能**: 管理API接口
+            }
+            
+            class "KafkaAdminClient.java" as KAC {
+                + createTopics()
+                + deleteTopics()
+                + describeCluster()
+                --
+                **路径**: clients/src/main/java/org/apache/kafka/clients/admin/KafkaAdminClient.java
+                **功能**: 管理客户端实现
+            }
+        }
+    }
+}
+
+package "Streams Module" {
+    package "streams/" {
+        class "KafkaStreams.java" as KS {
+            + start()
+            + close()
+            + state()
+            --
+            **路径**: streams/src/main/java/org/apache/kafka/streams/KafkaStreams.java
+            **功能**: 流处理主类
+        }
+        
+        class "StreamsBuilder.java" as SB {
+            + stream()
+            + table()
+            + build()
+            --
+            **路径**: streams/src/main/java/org/apache/kafka/streams/StreamsBuilder.java
+            **功能**: 流构建器
+        }
+        
+        class "KafkaClientSupplier.java" as KCS {
+            + getProducer()
+            + getConsumer()
+            + getAdmin()
+            --
+            **路径**: streams/src/main/java/org/apache/kafka/streams/KafkaClientSupplier.java
+            **功能**: 客户端供应商接口
+        }
+        
+        class "DefaultKafkaClientSupplier.java" as DKCS {
+            + getProducer()
+            + getConsumer()
+            + getAdmin()
+            --
+            **路径**: streams/src/main/java/org/apache/kafka/streams/processor/internals/DefaultKafkaClientSupplier.java
+            **功能**: 默认客户端供应商
+        }
+    }
+}
+
+package "Connect Module" {
+    package "connect/" {
+        class "Connector.java" as CONN {
+            + start()
+            + stop()
+            + taskConfigs()
+            --
+            **路径**: connect/api/src/main/java/org/apache/kafka/connect/connector/Connector.java
+            **功能**: 连接器基类
+        }
+        
+        class "SourceConnector.java" as SCONN {
+            + taskClass()
+            --
+            **路径**: connect/api/src/main/java/org/apache/kafka/connect/source/SourceConnector.java
+            **功能**: 源连接器
+        }
+        
+        class "SinkConnector.java" as SICONN {
+            + taskClass()
+            --
+            **路径**: connect/api/src/main/java/org/apache/kafka/connect/sink/SinkConnector.java
+            **功能**: 汇连接器
+        }
+    }
+}
+
+package "Tools Module" {
+    package "tools/" {
+        class "ConsoleProducer.java" as CP {
+            + main()
+            + start()
+            --
+            **路径**: tools/src/main/java/org/apache/kafka/tools/ConsoleProducer.java
+            **功能**: 控制台生产者
+        }
+        
+        class "ConsoleConsumer.java" as CC {
+            + main()
+            + start()
+            --
+            **路径**: tools/src/main/java/org/apache/kafka/tools/ConsoleConsumer.java
+            **功能**: 控制台消费者
+        }
+    }
+}
+
+' 依赖关系
+MAIN --> KRS : 创建
+KRS --> BS : 包含
+BS --> SS : 依赖
+BS --> APIS : 依赖
+BS --> RM : 依赖
+BS --> LM : 依赖
+BS --> GC : 依赖
+BS --> TC : 依赖
+BS --> RAFTM : 依赖
+
+SS --> RC : 使用
+APIS --> RM : 调用
+APIS --> GC : 调用
+APIS --> TC : 调用
+RM --> LM : 使用
+LM --> UL : 管理
+UL --> LS : 包含
+
+RAFTM --> KRC : 包含
+
+' 客户端依赖
+KCONS --> CDC : 使用
+CDC --> CKC : 创建
+CDC --> AKC : 创建
+ADMIN_IF <|-- KAC : 实现
+
+KPROD --> PI : 使用
+KPROD --> RA : 使用
+
+' Streams依赖
+KS --> DKCS : 使用
+DKCS --> KPROD : 创建
+DKCS --> KCONS : 创建
+DKCS --> ADMIN_IF : 创建
+KCS <|-- DKCS : 实现
+
+' Connect依赖
+CONN <|-- SCONN : 继承
+CONN <|-- SICONN : 继承
+
+' Tools依赖
+CP --> KPROD : 使用
+CC --> KCONS : 使用
+
+@enduml

@@ -142,6 +142,9 @@ class SocketServer(
   // SocketServer is constructed. Note that this just opens the ports and creates the data
   // structures. It does not start the acceptors and processors or their associated JVM
   // threads.
+  // 在构造 SocketServer 时，为静态配置的端点创建 acceptor 和 processor。
+  // 注意，这里只是打开端口并创建相关数据结构。
+  // 不会启动 acceptor 和 processor 线程，也不会启动它们关联的 JVM 线程。
   if (apiVersionManager.listenerType.equals(ListenerType.CONTROLLER)) {
     config.controllerListeners.foreach(createDataPlaneAcceptorAndProcessors)
   } else {
@@ -168,6 +171,16 @@ class SocketServer(
    * @return                      A future which is completed when all of the acceptor threads have
    *                              successfully started. If any of them do not start, the future will
    *                              be completed with an exception.
+   */
+  /**
+   * 此方法用于为该 SocketServer 管理的所有端点启用请求处理。每个端点会在其关联的 future 完成后异步启动。
+   * 因此，在此函数结束时，我们无法确定某个特定的请求处理器是否已经在运行——只能确定它有可能已经在运行。
+   *
+   * @param authorizerFutures     每个 [[Endpoint]] 对应一个 Future，用于在启动该 Endpoint 的处理器前等待。
+   *                              对于未出现在此映射中的端点，会在所有 authorizerFutures 完成后启动。
+   *
+   * @return                      一个 future，当所有 acceptor 线程都成功启动时完成。
+   *                              如果有任何线程未能启动，该 future 会以异常完成。
    */
   def enableRequestProcessing(
     authorizerFutures: Map[Endpoint, CompletableFuture[Void]]

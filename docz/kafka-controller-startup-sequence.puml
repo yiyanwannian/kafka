@@ -1,0 +1,167 @@
+@startuml Kafka控制器启动时序图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam participantBackgroundColor #F8F9FA
+skinparam participantBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+title Kafka控制器服务器启动时序图
+
+autonumber
+
+actor "启动调用者" as Caller
+participant "ControllerServer" as CS
+participant "状态管理" as Status
+participant "监控系统" as Metrics
+participant "安全组件" as Security
+participant "元数据系统" as Metadata
+participant "网络服务" as Network
+participant "QuorumController" as QC
+participant "API处理器" as API
+participant "发布器管理" as Publishers
+participant "注册管理" as Registration
+
+Caller -> CS: startup()
+activate CS
+
+note over CS: 第1阶段：启动前准备
+CS -> Status: maybeChangeStatus(SHUTDOWN, STARTING)
+activate Status
+Status --> CS: 状态变更成功
+deactivate Status
+
+CS -> CS: 设置启动超时时间
+note right: Deadline.fromDelay(time, config.serverMaxStartupTimeMs)
+
+note over CS: 第2阶段：基础组件初始化
+CS -> CS: 设置日志标识符
+CS -> CS: 初始化动态配置
+CS -> Status: maybeChangeStatus(STARTING, STARTED)
+activate Status
+Status --> CS: 状态变更成功
+deactivate Status
+
+note over CS: 第3阶段：监控指标系统初始化
+CS -> Metrics: 创建LinuxIoMetricsCollector
+activate Metrics
+Metrics --> CS: 指标收集器创建完成
+CS -> Metrics: 注册集群ID指标
+CS -> Metrics: 注册Yammer指标数量
+CS -> Metrics: 注册磁盘I/O指标
+deactivate Metrics
+
+note over CS: 第4阶段：安全认证组件初始化
+CS -> Security: 创建授权插件
+activate Security
+Security --> CS: 授权插件创建完成
+CS -> Security: 创建DelegationTokenCache
+CS -> Security: 创建CredentialProvider
+Security --> CS: 安全组件初始化完成
+deactivate Security
+
+note over CS: 第5阶段：元数据管理系统初始化
+CS -> Metadata: 创建KRaftMetadataCache
+activate Metadata
+Metadata --> CS: 元数据缓存创建完成
+CS -> Metadata: 创建KRaftMetadataCachePublisher
+CS -> Metadata: 创建FeaturesPublisher
+CS -> Metadata: 创建ControllerRegistrationsPublisher
+CS -> Metadata: 生成incarnationId
+Metadata --> CS: 元数据系统初始化完成
+deactivate Metadata
+
+note over CS: 第6阶段：网络服务初始化
+CS -> Network: 创建SimpleApiVersionManager
+activate Network
+Network --> CS: API版本管理器创建完成
+CS -> Network: 创建SocketServer
+CS -> Network: 创建ListenerInfo
+CS -> Network: 创建EndpointReadyFutures
+Network --> CS: 网络服务初始化完成
+deactivate Network
+
+note over CS: 第7阶段：控制器核心组件构建
+CS -> CS: 等待控制器仲裁投票者连接
+CS -> CS: 创建QuorumFeatures
+CS -> CS: 配置委托令牌管理器
+CS -> QC: 创建QuorumController.Builder
+activate QC
+CS -> QC: 配置控制器参数
+note right: 包括时间、Raft客户端、特性、\n指标、策略、故障处理器等
+CS -> QC: build()
+QC --> CS: QuorumController创建完成
+deactivate QC
+
+CS -> Security: 集成ClusterMetadataAuthorizer
+activate Security
+Security --> CS: 授权器集成完成
+deactivate Security
+
+note over CS: 第8阶段：API处理器初始化
+CS -> API: 创建QuotaManagers
+activate API
+API --> CS: 配额管理器创建完成
+CS -> API: 创建ClientQuotaMetadataManager
+CS -> API: 创建ControllerApis
+CS -> API: 创建KafkaRequestHandlerPool
+API --> CS: API处理器初始化完成
+deactivate API
+
+note over CS: 第9阶段：元数据发布器注册
+CS -> Publishers: 添加元数据缓存发布器
+activate Publishers
+CS -> Publishers: 添加特性发布器
+CS -> Publishers: 添加注册发布器
+CS -> Publishers: 创建注册管理器
+CS -> Publishers: 添加动态配置发布器
+CS -> Publishers: 添加客户端配额发布器
+CS -> Publishers: 添加主题集群配额发布器
+CS -> Publishers: 添加SCRAM发布器
+CS -> Publishers: 添加委托令牌发布器
+CS -> Publishers: 添加指标发布器
+CS -> Publishers: 添加ACL发布器
+Publishers --> CS: 发布器注册完成
+deactivate Publishers
+
+note over CS: 第10阶段：服务启动和同步
+CS -> Publishers: 安装所有元数据发布器
+activate Publishers
+Publishers --> CS: 发布器安装完成
+deactivate Publishers
+
+CS -> Network: 启用请求处理
+activate Network
+Network --> CS: 网络服务启动完成
+deactivate Network
+
+note over CS: 第11阶段：注册管理器启动
+CS -> Registration: 创建ControllerNodeProvider
+activate Registration
+CS -> Registration: 创建NodeToControllerChannelManager
+CS -> Registration: 启动注册通道管理器
+CS -> Registration: 启动注册管理器
+Registration --> CS: 注册管理器启动完成
+deactivate Registration
+
+note over CS: 第12阶段：启动完成同步
+CS -> CS: 等待所有授权器Future完成
+CS -> CS: 等待所有SocketServer接受器启动
+
+CS --> Caller: 启动完成
+deactivate CS
+
+note over Caller, Registration: 启动流程完成，控制器服务器开始正常工作
+
+' 异常处理流程
+alt 启动过程中发生异常
+    CS -> CS: 捕获异常
+    CS -> Status: 更改状态
+    CS -> CS: 调用故障处理器
+    CS -> CS: 执行shutdown()
+    CS -> Caller: 重新抛出异常
+end
+
+@enduml

@@ -1,0 +1,229 @@
+@startuml KRaft State Machine
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+title KRaft 状态机转换图
+
+state "UnattachedState" as UNATTACHED #F5F5DC {
+    UNATTACHED : **未连接状态**
+    UNATTACHED : - 初始状态或失去连接
+    UNATTACHED : - 不知道当前Leader
+    UNATTACHED : - 等待选举超时
+    UNATTACHED : --
+    UNATTACHED : **代码位置**:
+    UNATTACHED : raft/src/main/java/org/apache/kafka/raft/UnattachedState.java
+}
+
+state "ProspectiveState" as PROSPECTIVE #F5F5DC {
+    PROSPECTIVE : **预候选状态**
+    PROSPECTIVE : - PreVote阶段
+    PROSPECTIVE : - 测试是否有机会成为候选者
+    PROSPECTIVE : - 避免不必要的选举
+    PROSPECTIVE : --
+    PROSPECTIVE : **代码位置**:
+    PROSPECTIVE : raft/src/main/java/org/apache/kafka/raft/ProspectiveState.java
+}
+
+state "CandidateState" as CANDIDATE #F5F5DC {
+    CANDIDATE : **候选者状态**
+    CANDIDATE : - 正式选举阶段
+    CANDIDATE : - 向其他节点请求投票
+    CANDIDATE : - epoch + 1
+    CANDIDATE : --
+    CANDIDATE : **代码位置**:
+    CANDIDATE : raft/src/main/java/org/apache/kafka/raft/CandidateState.java
+}
+
+state "LeaderState" as LEADER #F5F5DC {
+    LEADER : **领导者状态**
+    LEADER : - 处理客户端请求
+    LEADER : - 复制日志到Followers
+    LEADER : - 管理高水位标记
+    LEADER : - 发送心跳
+    LEADER : --
+    LEADER : **代码位置**:
+    LEADER : raft/src/main/java/org/apache/kafka/raft/LeaderState.java
+}
+
+state "FollowerState" as FOLLOWER #F5F5DC {
+    FOLLOWER : **跟随者状态**
+    FOLLOWER : - 从Leader拉取日志
+    FOLLOWER : - 响应投票请求
+    FOLLOWER : - 检测Leader失效
+    FOLLOWER : --
+    FOLLOWER : **代码位置**:
+    FOLLOWER : raft/src/main/java/org/apache/kafka/raft/FollowerState.java
+}
+
+state "ResignedState" as RESIGNED #F5F5DC {
+    RESIGNED : **辞职状态**
+    RESIGNED : - Leader主动辞职
+    RESIGNED : - 发送EndQuorumEpoch
+    RESIGNED : - 临时状态
+    RESIGNED : --
+    RESIGNED : **代码位置**:
+    RESIGNED : raft/src/main/java/org/apache/kafka/raft/ResignedState.java
+}
+
+[*] --> UNATTACHED : 启动
+
+UNATTACHED --> PROSPECTIVE : 选举超时\n(hasElectionTimeoutExpired)
+note on link
+  **触发条件**:
+  - 选举超时
+  - 没有已知Leader
+  
+  **代码**:
+  QuorumState.transitionToProspective()
+end note
+
+UNATTACHED --> FOLLOWER : 收到有效Leader的消息
+note on link
+  **触发条件**:
+  - 收到BeginQuorumEpoch
+  - 收到有效的Fetch响应
+  
+  **代码**:
+  QuorumState.transitionToFollower()
+end note
+
+PROSPECTIVE --> CANDIDATE : 获得足够PreVote
+note on link
+  **触发条件**:
+  - 获得多数派PreVote
+  - epochElection.isVoteGranted()
+  
+  **代码**:
+  QuorumState.transitionToCandidate()
+end note
+
+PROSPECTIVE --> UNATTACHED : PreVote被拒绝或超时
+note on link
+  **触发条件**:
+  - PreVote失败
+  - 选举超时
+  
+  **代码**:
+  prospectiveTransitionAfterElectionLoss()
+end note
+
+PROSPECTIVE --> FOLLOWER : 发现更高epoch的Leader
+note on link
+  **触发条件**:
+  - 收到更高epoch的消息
+  
+  **代码**:
+  transitionToFollower()
+end note
+
+CANDIDATE --> LEADER : 获得多数派投票
+note on link
+  **触发条件**:
+  - 获得多数派投票
+  - epochElection.isVoteGranted()
+  
+  **代码**:
+  QuorumState.transitionToLeader()
+  onBecomeLeader()
+end note
+
+CANDIDATE --> PROSPECTIVE : 选举失败
+note on link
+  **触发条件**:
+  - 选举超时
+  - 投票被拒绝
+  
+  **代码**:
+  transitionToProspective()
+end note
+
+CANDIDATE --> FOLLOWER : 发现更高epoch的Leader
+note on link
+  **触发条件**:
+  - 收到更高epoch的BeginQuorumEpoch
+  
+  **代码**:
+  transitionToFollower()
+end note
+
+LEADER --> RESIGNED : 主动辞职
+note on link
+  **触发条件**:
+  - 收到shutdown信号
+  - 检测到仲裁失效
+  
+  **代码**:
+  transitionToResigned()
+end note
+
+LEADER --> UNATTACHED : 失去多数派支持
+note on link
+  **触发条件**:
+  - checkQuorum超时
+  - 网络分区
+  
+  **代码**:
+  transitionToUnattached()
+end note
+
+FOLLOWER --> PROSPECTIVE : Leader失效
+note on link
+  **触发条件**:
+  - Fetch超时
+  - hasFetchTimeoutExpired()
+  
+  **代码**:
+  transitionToProspective()
+end note
+
+FOLLOWER --> FOLLOWER : 收到新Leader的BeginQuorumEpoch
+note on link
+  **触发条件**:
+  - 同一epoch内Leader变更
+  - 更高epoch的新Leader
+  
+  **代码**:
+  transitionToFollower()
+end note
+
+RESIGNED --> UNATTACHED : 辞职完成
+note on link
+  **触发条件**:
+  - EndQuorumEpoch发送完成
+  
+  **代码**:
+  transitionToUnattached()
+end note
+
+note top of UNATTACHED
+  **状态持久化**:
+  所有状态转换都会调用
+  QuorumState.durableTransitionTo()
+  写入选举状态到磁盘
+  
+  **文件位置**:
+  FileQuorumStateStore.DEFAULT_FILE_NAME
+  (__cluster_metadata-0/quorum-state)
+end note
+
+note bottom of LEADER
+  **Leader特殊职责**:
+  1. 管理BatchAccumulator
+  2. 处理客户端写请求
+  3. 复制日志到Followers
+  4. 计算和更新高水位
+  5. 发送心跳(空的Fetch响应)
+  6. 处理快照传输
+end note
+
+note bottom of FOLLOWER
+  **Follower特殊职责**:
+  1. 定期发送Fetch请求
+  2. 应用Leader的日志条目
+  3. 更新本地高水位
+  4. 响应投票请求
+  5. 检测Leader失效
+  6. 下载和应用快照
+end note
+
+@enduml
