@@ -2758,46 +2758,55 @@ class ReplicaManager(val config: KafkaConfig,
     }
   }
 
+    /**
+   * 获取或创建指定的分区对象
+   * 根据分区的当前状态（离线、在线、不存在）进行不同的处理逻辑
+   *
+   * @param tp 主题分区对象，包含主题名和分区索引
+   * @param delta 主题变更增量，包含主题的变更信息
+   * @param topicId 主题的唯一标识符
+   * @return Option[(Partition, Boolean)] 返回分区对象和是否为新创建的标志，如果无法创建则返回 None
+   */
   private[kafka] def getOrCreatePartition(tp: TopicPartition,
                                           delta: TopicsDelta,
                                           topicId: Uuid): Option[(Partition, Boolean)] = {
-    getPartition(tp) match {
-      case HostedPartition.Offline(offlinePartition) =>
-        if (offlinePartition.flatMap(p => p.topicId).contains(topicId)) {
+    getPartition(tp) match { // 获取分区并进行模式匹配
+      case HostedPartition.Offline(offlinePartition) => // 如果分区处于离线状态
+        if (offlinePartition.flatMap(p => p.topicId).contains(topicId)) { // 如果离线分区的主题ID与请求的主题ID匹配
           stateChangeLogger.warn(s"Unable to bring up new local leader $tp " +
             s"with topic id $topicId because it resides in an offline log " +
-            "directory.")
-          None
-        } else {
+            "directory.") // 记录警告日志，说明无法启动新的本地 leader 因为分区在离线日志目录中
+          None // 返回 None，表示无法创建分区
+        } else { // 如果离线分区的主题ID与请求的主题ID不匹配
           stateChangeLogger.info(s"Creating new partition $tp with topic id " + s"$topicId." +
             s"A topic with the same name but different id exists but it resides in an offline log " +
-            s"directory.")
-          val partition = Partition(new TopicIdPartition(topicId, tp), time, this)
-          allPartitions.put(tp, HostedPartition.Online(partition))
-          Some(partition, true)
+            s"directory.") // 记录信息日志，说明创建新分区，同名但不同ID的主题存在于离线目录中
+          val partition = Partition(new TopicIdPartition(topicId, tp), time, this) // 创建新的分区对象
+          allPartitions.put(tp, HostedPartition.Online(partition)) // 将新分区标记为在线并添加到分区映射中
+          Some(partition, true) // 返回新创建的分区和 true 标志
         }
 
-      case HostedPartition.Online(partition) =>
-        if (partition.topicId.exists(_ != topicId)) {
+      case HostedPartition.Online(partition) => // 如果分区已经在线
+        if (partition.topicId.exists(_ != topicId)) { // 如果分区的主题ID存在且与请求的主题ID不匹配
           // Note: Partition#topicId will be None here if the Log object for this partition
           // has not been created.
           throw new IllegalStateException(s"Topic $tp exists, but its ID is " +
-            s"${partition.topicId.get}, not $topicId as expected")
+            s"${partition.topicId.get}, not $topicId as expected") // 抛出异常，说明主题存在但ID不匹配
         }
-        Some(partition, false)
+        Some(partition, false) // 返回现有分区和 false 标志（表示不是新创建的）
 
-      case HostedPartition.None =>
-        if (delta.image().topicsById().containsKey(topicId)) {
+      case HostedPartition.None => // 如果分区不存在
+        if (delta.image().topicsById().containsKey(topicId)) { // 如果主题增量镜像中包含该主题ID
           stateChangeLogger.error(s"Expected partition $tp with topic id " +
-            s"$topicId to exist, but it was missing. Creating...")
-        } else {
+            s"$topicId to exist, but it was missing. Creating...") // 记录错误日志，说明期望分区存在但实际缺失
+        } else { // 如果主题增量镜像中不包含该主题ID
           stateChangeLogger.info(s"Creating new partition $tp with topic id " +
-            s"$topicId.")
+            s"$topicId.") // 记录信息日志，说明创建新分区
         }
         // it's a partition that we don't know about yet, so create it and mark it online
-        val partition = Partition(new TopicIdPartition(topicId, tp), time, this)
-        allPartitions.put(tp, HostedPartition.Online(partition))
-        Some(partition, true)
+        val partition = Partition(new TopicIdPartition(topicId, tp), time, this) // 创建新的分区对象
+        allPartitions.put(tp, HostedPartition.Online(partition)) // 将新分区标记为在线并添加到分区映射中
+        Some(partition, true) // 返回新创建的分区和 true 标志
     }
   }
 
