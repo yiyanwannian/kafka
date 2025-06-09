@@ -2045,186 +2045,195 @@ class ReplicaManager(val config: KafkaConfig,
 
   def getLogConfig(topicPartition: TopicPartition): Option[LogConfig] = localLog(topicPartition).map(_.config)
 
+  /**
+   * 处理来自控制器的 LeaderAndIsr 请求，使当前 broker 成为指定分区的 leader 或 follower
+   * 这是副本管理器中最核心的方法之一，负责处理分区角色转换
+   *
+   * @param correlationId 请求的关联ID，用于日志追踪
+   * @param leaderAndIsrRequest 来自控制器的 LeaderAndIsr 请求，包含分区状态信息
+   * @param onLeadershipChange 角色变更时的回调函数，传入成为 leader 和 follower 的分区集合
+   * @return LeaderAndIsrResponse 响应对象，包含处理结果
+   */
   def becomeLeaderOrFollower(correlationId: Int,
                              leaderAndIsrRequest: LeaderAndIsrRequest,
                              onLeadershipChange: (Iterable[Partition], Iterable[Partition]) => Unit): LeaderAndIsrResponse = {
-    val startMs = time.milliseconds()
-    replicaStateChangeLock synchronized {
-      val controllerId = leaderAndIsrRequest.controllerId
-      val requestPartitionStates = leaderAndIsrRequest.partitionStates.asScala
+    val startMs = time.milliseconds() // 记录开始时间，用于统计处理耗时
+    replicaStateChangeLock synchronized { // 使用同步锁确保副本状态变更的线程安全
+      val controllerId = leaderAndIsrRequest.controllerId // 获取控制器ID
+      val requestPartitionStates = leaderAndIsrRequest.partitionStates.asScala // 获取请求中的分区状态列表
       stateChangeLogger.info(s"Handling LeaderAndIsr request correlationId $correlationId from controller " +
-        s"$controllerId for ${requestPartitionStates.size} partitions")
-      if (stateChangeLogger.isTraceEnabled)
+        s"$controllerId for ${requestPartitionStates.size} partitions") // 记录开始处理请求的日志
+      if (stateChangeLogger.isTraceEnabled) // 如果启用了 trace 级别日志
         requestPartitionStates.foreach { partitionState =>
           stateChangeLogger.trace(s"Received LeaderAndIsr request $partitionState " +
             s"correlation id $correlationId from controller $controllerId " +
-            s"epoch ${leaderAndIsrRequest.controllerEpoch}")
+            s"epoch ${leaderAndIsrRequest.controllerEpoch}") // 记录每个分区状态的详细信息
         }
-      val topicIds = leaderAndIsrRequest.topicIds()
-      def topicIdFromRequest(topicName: String): Option[Uuid] = {
-        val topicId = topicIds.get(topicName)
+      val topicIds = leaderAndIsrRequest.topicIds() // 获取请求中的主题ID映射
+      def topicIdFromRequest(topicName: String): Option[Uuid] = { // 定义从请求中获取主题ID的辅助函数
+        val topicId = topicIds.get(topicName) // 根据主题名获取主题ID
         // if invalid topic ID return None
-        if (topicId == null || topicId == Uuid.ZERO_UUID)
-          None
+        if (topicId == null || topicId == Uuid.ZERO_UUID) // 如果主题ID无效（null或零值）
+          None // 返回 None
         else
-          Some(topicId)
+          Some(topicId) // 返回有效的主题ID
       }
 
-      val response = {
-        if (leaderAndIsrRequest.controllerEpoch < controllerEpoch) {
+      val response = { // 构建响应对象
+        if (leaderAndIsrRequest.controllerEpoch < controllerEpoch) { // 如果请求的控制器 epoch 小于当前已知的 epoch
           stateChangeLogger.warn(s"Ignoring LeaderAndIsr request from controller $controllerId with " +
             s"correlation id $correlationId since its controller epoch ${leaderAndIsrRequest.controllerEpoch} is old. " +
-            s"Latest known controller epoch is $controllerEpoch")
-          leaderAndIsrRequest.getErrorResponse(Errors.STALE_CONTROLLER_EPOCH.exception)
-        } else {
-          val responseMap = new mutable.HashMap[TopicPartition, Errors]
-          controllerEpoch = leaderAndIsrRequest.controllerEpoch
+            s"Latest known controller epoch is $controllerEpoch") // 记录警告日志，说明忽略过期的请求
+          leaderAndIsrRequest.getErrorResponse(Errors.STALE_CONTROLLER_EPOCH.exception) // 返回过期控制器 epoch 错误响应
+        } else { // 如果控制器 epoch 有效
+          val responseMap = new mutable.HashMap[TopicPartition, Errors] // 创建响应映射，记录每个分区的处理结果
+          controllerEpoch = leaderAndIsrRequest.controllerEpoch // 更新当前控制器 epoch
 
-          val partitions = new mutable.HashSet[Partition]()
-          val partitionsToBeLeader = new mutable.HashMap[Partition, LeaderAndIsrRequest.PartitionState]()
-          val partitionsToBeFollower = new mutable.HashMap[Partition, LeaderAndIsrRequest.PartitionState]()
-          val topicIdUpdateFollowerPartitions = new mutable.HashSet[Partition]()
-          val allTopicPartitionsInRequest = new mutable.HashSet[TopicPartition]()
+          val partitions = new mutable.HashSet[Partition]() // 存储所有需要处理的分区
+          val partitionsToBeLeader = new mutable.HashMap[Partition, LeaderAndIsrRequest.PartitionState]() // 存储需要成为 leader 的分区及其状态
+          val partitionsToBeFollower = new mutable.HashMap[Partition, LeaderAndIsrRequest.PartitionState]() // 存储需要成为 follower 的分区及其状态
+          val topicIdUpdateFollowerPartitions = new mutable.HashSet[Partition]() // 存储需要更新主题ID的 follower 分区
+          val allTopicPartitionsInRequest = new mutable.HashSet[TopicPartition]() // 存储请求中的所有主题分区
 
           // First create the partition if it doesn't exist already
-          requestPartitionStates.foreach { partitionState =>
-            val topicPartition = new TopicPartition(partitionState.topicName, partitionState.partitionIndex)
-            allTopicPartitionsInRequest += topicPartition
-            val partitionOpt = getPartition(topicPartition) match {
-              case HostedPartition.Offline(_) =>
+          requestPartitionStates.foreach { partitionState => // 遍历请求中的每个分区状态
+            val topicPartition = new TopicPartition(partitionState.topicName, partitionState.partitionIndex) // 创建主题分区对象
+            allTopicPartitionsInRequest += topicPartition // 将分区添加到请求分区集合中
+            val partitionOpt = getPartition(topicPartition) match { // 获取分区对象并进行模式匹配
+              case HostedPartition.Offline(_) => // 如果分区处于离线状态
                 stateChangeLogger.warn(s"Ignoring LeaderAndIsr request from " +
                   s"controller $controllerId with correlation id $correlationId " +
                   s"epoch $controllerEpoch for partition $topicPartition as the local replica for the " +
-                  "partition is in an offline log directory")
-                responseMap.put(topicPartition, Errors.KAFKA_STORAGE_ERROR)
-                None
+                  "partition is in an offline log directory") // 记录警告日志，说明忽略离线分区的请求
+                responseMap.put(topicPartition, Errors.KAFKA_STORAGE_ERROR) // 在响应中标记存储错误
+                None // 返回 None，不处理此分区
 
-              case HostedPartition.Online(partition) =>
-                Some(partition)
+              case HostedPartition.Online(partition) => // 如果分区在线
+                Some(partition) // 返回分区对象
 
-              case HostedPartition.None =>
-                val partition = Partition(topicPartition, time, this)
-                allPartitions.putIfAbsent(topicPartition, HostedPartition.Online(partition))
-                Some(partition)
+              case HostedPartition.None => // 如果分区不存在
+                val partition = Partition(topicPartition, time, this) // 创建新的分区对象
+                allPartitions.putIfAbsent(topicPartition, HostedPartition.Online(partition)) // 将新分区添加到分区映射中
+                Some(partition) // 返回新创建的分区对象
             }
 
             // Next check the topic ID and the partition's leader epoch
-            partitionOpt.foreach { partition =>
-              val currentLeaderEpoch = partition.getLeaderEpoch
-              val requestLeaderEpoch = partitionState.leaderEpoch
-              val requestTopicId = topicIdFromRequest(topicPartition.topic)
-              val logTopicId = partition.topicId
+            partitionOpt.foreach { partition => // 对于每个有效的分区对象
+              val currentLeaderEpoch = partition.getLeaderEpoch // 获取当前分区的 leader epoch
+              val requestLeaderEpoch = partitionState.leaderEpoch // 获取请求中的 leader epoch
+              val requestTopicId = topicIdFromRequest(topicPartition.topic) // 从请求中获取主题ID
+              val logTopicId = partition.topicId // 获取分区日志中的主题ID
 
-              if (!hasConsistentTopicId(requestTopicId, logTopicId)) {
+              if (!hasConsistentTopicId(requestTopicId, logTopicId)) { // 检查主题ID是否一致
                 stateChangeLogger.error(s"Topic ID in memory: ${logTopicId.get} does not" +
                   s" match the topic ID for partition $topicPartition received: " +
-                  s"${requestTopicId.get}.")
-                responseMap.put(topicPartition, Errors.INCONSISTENT_TOPIC_ID)
-              } else if (requestLeaderEpoch >= currentLeaderEpoch) {
+                  s"${requestTopicId.get}.") // 记录主题ID不一致的错误日志
+                responseMap.put(topicPartition, Errors.INCONSISTENT_TOPIC_ID) // 在响应中标记主题ID不一致错误
+              } else if (requestLeaderEpoch >= currentLeaderEpoch) { // 如果请求的 leader epoch 大于等于当前 epoch
                 // If the leader epoch is valid record the epoch of the controller that made the leadership decision.
                 // This is useful while updating the isr to maintain the decision maker controller's epoch in the zookeeper path
-                if (partitionState.replicas.contains(localBrokerId)) {
-                  partitions += partition
-                  if (partitionState.leader == localBrokerId) {
-                    partitionsToBeLeader.put(partition, partitionState)
-                  } else {
-                    partitionsToBeFollower.put(partition, partitionState)
+                if (partitionState.replicas.contains(localBrokerId)) { // 如果当前 broker 在副本列表中
+                  partitions += partition // 将分区添加到处理集合中
+                  if (partitionState.leader == localBrokerId) { // 如果当前 broker 是新的 leader
+                    partitionsToBeLeader.put(partition, partitionState) // 添加到待成为 leader 的分区集合
+                  } else { // 如果当前 broker 是 follower
+                    partitionsToBeFollower.put(partition, partitionState) // 添加到待成为 follower 的分区集合
                   }
-                } else {
+                } else { // 如果当前 broker 不在副本列表中
                   stateChangeLogger.warn(s"Ignoring LeaderAndIsr request from controller $controllerId with " +
                     s"correlation id $correlationId epoch $controllerEpoch for partition $topicPartition as itself is not " +
-                    s"in assigned replica list ${partitionState.replicas.asScala.mkString(",")}")
-                  responseMap.put(topicPartition, Errors.UNKNOWN_TOPIC_OR_PARTITION)
+                    s"in assigned replica list ${partitionState.replicas.asScala.mkString(",")}") // 记录警告日志
+                  responseMap.put(topicPartition, Errors.UNKNOWN_TOPIC_OR_PARTITION) // 在响应中标记未知主题或分区错误
                 }
-              } else if (requestLeaderEpoch < currentLeaderEpoch) {
+              } else if (requestLeaderEpoch < currentLeaderEpoch) { // 如果请求的 leader epoch 小于当前 epoch
                 stateChangeLogger.warn(s"Ignoring LeaderAndIsr request from " +
                   s"controller $controllerId with correlation id $correlationId " +
                   s"epoch $controllerEpoch for partition $topicPartition since its associated " +
                   s"leader epoch $requestLeaderEpoch is smaller than the current " +
-                  s"leader epoch $currentLeaderEpoch")
-                responseMap.put(topicPartition, Errors.STALE_CONTROLLER_EPOCH)
-              } else {
-                val error = requestTopicId match {
-                  case Some(topicId) if logTopicId.isEmpty =>
+                  s"leader epoch $currentLeaderEpoch") // 记录警告日志，说明忽略过期的 leader epoch
+                responseMap.put(topicPartition, Errors.STALE_CONTROLLER_EPOCH) // 在响应中标记过期控制器 epoch 错误
+              } else { // 如果请求的 leader epoch 等于当前 epoch
+                val error = requestTopicId match { // 根据请求中的主题ID进行模式匹配
+                  case Some(topicId) if logTopicId.isEmpty => // 如果请求有主题ID但日志中没有
                     // The controller may send LeaderAndIsr to upgrade to using topic IDs without bumping the epoch.
                     // If we have a matching epoch, we expect the log to be defined.
-                    val log = localLogOrException(partition.topicPartition)
-                    log.assignTopicId(topicId)
+                    val log = localLogOrException(partition.topicPartition) // 获取本地日志对象
+                    log.assignTopicId(topicId) // 为日志分配主题ID
                     stateChangeLogger.info(s"Updating log for $topicPartition to assign topic ID " +
                       s"$topicId from LeaderAndIsr request from controller $controllerId with correlation " +
-                      s"id $correlationId epoch $controllerEpoch")
-                    if (partitionState.leader != localBrokerId)
-                      topicIdUpdateFollowerPartitions.add(partition)
-                    Errors.NONE
-                  case None if logTopicId.isDefined && partitionState.leader != localBrokerId =>
+                      s"id $correlationId epoch $controllerEpoch") // 记录更新日志主题ID的信息
+                    if (partitionState.leader != localBrokerId) // 如果当前 broker 不是 leader
+                      topicIdUpdateFollowerPartitions.add(partition) // 添加到需要更新主题ID的 follower 分区集合
+                    Errors.NONE // 返回无错误
+                  case None if logTopicId.isDefined && partitionState.leader != localBrokerId => // 如果请求中没有主题ID但日志中有，且当前 broker 不是 leader
                     // If we have a topic ID in the log but not in the request, we must have previously had topic IDs but
                     // are now downgrading. If we are a follower, remove the topic ID from the PartitionFetchState.
                     stateChangeLogger.info(s"Updating PartitionFetchState for $topicPartition to remove log topic ID " +
                       s"${logTopicId.get} since LeaderAndIsr request from controller $controllerId with correlation " +
-                      s"id $correlationId epoch $controllerEpoch did not contain a topic ID")
-                    topicIdUpdateFollowerPartitions.add(partition)
-                    Errors.NONE
-                  case _ =>
+                      s"id $correlationId epoch $controllerEpoch did not contain a topic ID") // 记录移除主题ID的信息
+                    topicIdUpdateFollowerPartitions.add(partition) // 添加到需要更新主题ID的 follower 分区集合
+                    Errors.NONE // 返回无错误
+                  case _ => // 其他情况
                     stateChangeLogger.info(s"Ignoring LeaderAndIsr request from " +
                       s"controller $controllerId with correlation id $correlationId " +
                       s"epoch $controllerEpoch for partition $topicPartition since its associated " +
-                      s"leader epoch $requestLeaderEpoch matches the current leader epoch")
-                    Errors.STALE_CONTROLLER_EPOCH
+                      s"leader epoch $requestLeaderEpoch matches the current leader epoch") // 记录忽略请求的信息
+                    Errors.STALE_CONTROLLER_EPOCH // 返回过期控制器 epoch 错误
                 }
-                responseMap.put(topicPartition, error)
+                responseMap.put(topicPartition, error) // 将错误结果添加到响应映射中
               }
             }
           }
 
-          val highWatermarkCheckpoints = new LazyOffsetCheckpoints(this.highWatermarkCheckpoints.asJava)
-          val partitionsBecomeLeader = if (partitionsToBeLeader.nonEmpty)
+          val highWatermarkCheckpoints = new LazyOffsetCheckpoints(this.highWatermarkCheckpoints.asJava) // 创建高水位检查点对象，用于延迟加载
+          val partitionsBecomeLeader = if (partitionsToBeLeader.nonEmpty) // 如果有分区需要成为 leader
             makeLeaders(controllerId, controllerEpoch, partitionsToBeLeader, correlationId, responseMap,
-              highWatermarkCheckpoints, topicIdFromRequest)
+              highWatermarkCheckpoints, topicIdFromRequest) // 调用 makeLeaders 方法处理成为 leader 的分区
           else
-            Set.empty[Partition]
-          val partitionsBecomeFollower = if (partitionsToBeFollower.nonEmpty)
+            Set.empty[Partition] // 否则返回空集合
+          val partitionsBecomeFollower = if (partitionsToBeFollower.nonEmpty) // 如果有分区需要成为 follower
             makeFollowers(controllerId, controllerEpoch, partitionsToBeFollower, correlationId, responseMap,
-              highWatermarkCheckpoints, topicIdFromRequest)
+              highWatermarkCheckpoints, topicIdFromRequest) // 调用 makeFollowers 方法处理成为 follower 的分区
           else
-            Set.empty[Partition]
+            Set.empty[Partition] // 否则返回空集合
 
-          val followerTopicSet = partitionsBecomeFollower.map(_.topic).toSet
-          updateLeaderAndFollowerMetrics(followerTopicSet)
+          val followerTopicSet = partitionsBecomeFollower.map(_.topic).toSet // 获取成为 follower 的分区的主题集合
+          updateLeaderAndFollowerMetrics(followerTopicSet) // 更新 leader 和 follower 的指标
 
-          if (topicIdUpdateFollowerPartitions.nonEmpty)
-            updateTopicIdForFollowers(controllerId, controllerEpoch, topicIdUpdateFollowerPartitions, correlationId, topicIdFromRequest)
+          if (topicIdUpdateFollowerPartitions.nonEmpty) // 如果有需要更新主题ID的 follower 分区
+            updateTopicIdForFollowers(controllerId, controllerEpoch, topicIdUpdateFollowerPartitions, correlationId, topicIdFromRequest) // 更新 follower 分区的主题ID
 
           // We initialize highwatermark thread after the first LeaderAndIsr request. This ensures that all the partitions
           // have been completely populated before starting the checkpointing there by avoiding weird race conditions
-          startHighWatermarkCheckPointThread()
+          startHighWatermarkCheckPointThread() // 启动高水位检查点线程，确保所有分区完全填充后再开始检查点操作
 
-          maybeAddLogDirFetchers(partitions, highWatermarkCheckpoints, topicIdFromRequest)
+          maybeAddLogDirFetchers(partitions, highWatermarkCheckpoints, topicIdFromRequest) // 可能添加日志目录获取器
 
-          replicaFetcherManager.shutdownIdleFetcherThreads()
-          replicaAlterLogDirsManager.shutdownIdleFetcherThreads()
+          replicaFetcherManager.shutdownIdleFetcherThreads() // 关闭空闲的副本获取器线程
+          replicaAlterLogDirsManager.shutdownIdleFetcherThreads() // 关闭空闲的日志目录变更管理器线程
 
-          remoteLogManager.foreach(rlm => rlm.onLeadershipChange((partitionsBecomeLeader.toSet: Set[TopicPartitionLog]).asJava, (partitionsBecomeFollower.toSet: Set[TopicPartitionLog]).asJava, topicIds))
+          remoteLogManager.foreach(rlm => rlm.onLeadershipChange((partitionsBecomeLeader.toSet: Set[TopicPartitionLog]).asJava, (partitionsBecomeFollower.toSet: Set[TopicPartitionLog]).asJava, topicIds)) // 通知远程日志管理器角色变更
 
-          onLeadershipChange(partitionsBecomeLeader, partitionsBecomeFollower)
+          onLeadershipChange(partitionsBecomeLeader, partitionsBecomeFollower) // 调用角色变更回调函数
 
-          val topics = new util.LinkedHashMap[Uuid, util.List[LeaderAndIsrResponse.PartitionError]]
-          responseMap.foreachEntry { (tp, error) =>
-            val topicId = topicIds.get(tp.topic)
-            var partitionErrors = topics.get(topicId)
-            if (partitionErrors == null) {
-              partitionErrors = new util.ArrayList[LeaderAndIsrResponse.PartitionError]()
-              topics.put(topicId, partitionErrors)
+          val topics = new util.LinkedHashMap[Uuid, util.List[LeaderAndIsrResponse.PartitionError]] // 创建主题ID到分区错误列表的映射
+          responseMap.foreachEntry { (tp, error) => // 遍历响应映射中的每个条目
+            val topicId = topicIds.get(tp.topic) // 获取主题ID
+            var partitionErrors = topics.get(topicId) // 获取该主题的分区错误列表
+            if (partitionErrors == null) { // 如果错误列表不存在
+              partitionErrors = new util.ArrayList[LeaderAndIsrResponse.PartitionError]() // 创建新的错误列表
+              topics.put(topicId, partitionErrors) // 将错误列表添加到映射中
             }
-            partitionErrors.add(new LeaderAndIsrResponse.PartitionError(tp.partition(), error.code))
+            partitionErrors.add(new LeaderAndIsrResponse.PartitionError(tp.partition(), error.code)) // 添加分区错误到列表中
           }
-          new LeaderAndIsrResponse(Errors.NONE, topics)
+          new LeaderAndIsrResponse(Errors.NONE, topics) // 创建并返回 LeaderAndIsr 响应对象
         }
       }
-      val endMs = time.milliseconds()
-      val elapsedMs = endMs - startMs
+      val endMs = time.milliseconds() // 记录结束时间
+      val elapsedMs = endMs - startMs // 计算处理耗时
       stateChangeLogger.info(s"Finished LeaderAndIsr request in ${elapsedMs}ms correlationId $correlationId from controller " +
-        s"$controllerId for ${requestPartitionStates.size} partitions")
-      response
+        s"$controllerId for ${requestPartitionStates.size} partitions") // 记录完成处理请求的日志
+      response // 返回响应对象
     }
   }
 

@@ -1,0 +1,72 @@
+@startuml Replica_Sync_Mechanism
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+package "Leader Broker" {
+    component "Leader Partition" as LP #E8F5E8
+    component "Leader Log" as LL #E3F2FD
+    database "Log Segments" as LS1 #F1F8E9
+}
+
+package "Follower Broker 1" {
+    component "Follower Partition 1" as FP1 #F3E5F5
+    component "Follower Log 1" as FL1 #FFF3E0
+    database "Log Segments" as LS2 #F1F8E9
+    component "ReplicaFetcherThread 1" as RFT1 #FCE4EC
+}
+
+package "Follower Broker 2" {
+    component "Follower Partition 2" as FP2 #F3E5F5
+    component "Follower Log 2" as FL2 #FFF3E0
+    database "Log Segments" as LS3 #F1F8E9
+    component "ReplicaFetcherThread 2" as RFT2 #FCE4EC
+}
+
+' 数据流向
+LP --> LL : "append records"
+LL --> LS1 : "write to segments"
+
+RFT1 --> LP : "FetchRequest(offset, maxBytes)"
+LP --> RFT1 : "FetchResponse(records, HW)"
+RFT1 --> FP1 : "append fetched records"
+FP1 --> FL1 : "append to log"
+FL1 --> LS2 : "write to segments"
+
+RFT2 --> LP : "FetchRequest(offset, maxBytes)"
+LP --> RFT2 : "FetchResponse(records, HW)"
+RFT2 --> FP2 : "append fetched records"
+FP2 --> FL2 : "append to log"
+FL2 --> LS3 : "write to segments"
+
+' 状态更新
+FP1 --> LP : "updateFollowerFetchState()"
+FP2 --> LP : "updateFollowerFetchState()"
+LP --> LP : "maybeIncrementLeaderHW()"
+
+note right of LP
+    Leader 处理：
+    • 接收 Follower 拉取请求
+    • 返回日志数据和高水位
+    • 更新 Follower 状态
+    • 重新计算高水位
+    • 检查 ISR 扩展/收缩
+end note
+
+note left of RFT1
+    Follower 拉取：
+    • 定期发送 FetchRequest
+    • 指定起始偏移量和最大字节数
+    • 处理 FetchResponse
+    • 追加到本地日志
+    • 更新 LEO 和状态
+end note
+
+note bottom of LS1
+    同步特性：
+    • 异步复制：Follower 主动拉取
+    • 批量传输：提高网络效率
+    • 压缩支持：减少网络传输
+    • 错误重试：网络异常自动重试
+    • 偏移量跟踪：精确的进度管理
+end note
+@enduml

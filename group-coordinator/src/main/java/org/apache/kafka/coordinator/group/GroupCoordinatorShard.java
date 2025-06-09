@@ -153,6 +153,11 @@ import java.util.concurrent.TimeUnit;
  * 2) The replay methods which apply records to the hard state. Those are used in the request
  *    handling as well as during the initial loading of the records from the partitions.
  */
+/**
+ * group coordinator shard 是一个复制状态机，用于管理所有经典组和消费者组的元数据。它持有这些组的硬状态和软状态。此类包含两类方法：
+ * 1）请求处理器：处理请求并生成响应及用于修改硬状态的记录。这些记录会被运行时写入，并通过 replay 方法应用到硬状态。
+ * 2）replay 方法：将记录应用到硬状态。这些方法既用于请求处理，也用于从分区初始加载记录时。
+ */
 @SuppressWarnings("ClassFanOutComplexity")
 public class GroupCoordinatorShard implements CoordinatorShard<CoordinatorRecord> {
 

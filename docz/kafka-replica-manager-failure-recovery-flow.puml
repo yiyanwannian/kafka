@@ -1,0 +1,102 @@
+@startuml Failure_Recovery_Flow
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+participant "Broker" as B #E3F2FD
+participant "ReplicaManager" as RM #E8F5E8
+participant "LogDirFailureHandler" as LDFH #F3E5F5
+participant "Controller" as CTRL #FFF3E0
+participant "Other Brokers" as OB #FCE4EC
+
+group 故障检测阶段
+    B -> B : 检测到存储故障
+    note right : 磁盘 I/O 错误、文件系统故障等
+
+    B -> LDFH : 触发故障处理
+    activate LDFH
+
+    LDFH -> RM : markPartitionOffline()
+    activate RM
+
+    loop 每个受影响的分区
+        RM -> RM : 标记分区为 Offline
+        note right : HostedPartition.Offline
+        RM -> RM : 停止相关操作
+        note right : 停止生产、消费、同步
+    end
+
+    RM -> CTRL : 通知分区不可用
+    deactivate RM
+    deactivate LDFH
+end
+
+group Leader 重选阶段
+    CTRL -> CTRL : 检测到分区 Leader 不可用
+    activate CTRL
+
+    CTRL -> CTRL : 从 ISR 中选择新 Leader
+    note right : 选择 ISR 中的第一个可用副本
+
+    CTRL -> OB : LeaderAndIsrRequest
+    activate OB
+
+    OB -> OB : becomeLeaderOrFollower()
+    note right : 更新分区状态
+
+    OB -> CTRL : LeaderAndIsrResponse
+    deactivate OB
+
+    CTRL -> CTRL : 更新元数据
+    deactivate CTRL
+end
+
+group 故障恢复阶段
+    B -> B : 修复存储问题
+    note right : 更换磁盘、修复文件系统等
+
+    B -> RM : 重启 ReplicaManager
+    activate RM
+
+    RM -> RM : 扫描日志目录
+    note right : 恢复可用的分区
+
+    loop 每个恢复的分区
+        RM -> RM : 创建 Partition 对象
+        RM -> RM : 恢复日志状态
+        note right : 读取检查点、重建索引
+        RM -> RM : 标记分区为 Online
+    end
+
+    RM -> CTRL : 注册恢复的分区
+    deactivate RM
+end
+
+group 重新平衡阶段
+    CTRL -> CTRL : 检测到副本恢复
+    activate CTRL
+
+    CTRL -> CTRL : 重新分配 Leader
+    note right : 可能将 Leader 迁移回恢复的副本
+
+    CTRL -> OB : LeaderAndIsrRequest
+    CTRL -> B : LeaderAndIsrRequest
+
+    B -> B : 开始作为 Follower 同步
+    note right : 从当前 Leader 拉取数据
+
+    B -> B : 追赶到 ISR 要求
+    note right : LEO 接近 HW
+
+    CTRL -> CTRL : 将副本重新加入 ISR
+    deactivate CTRL
+end
+
+note over B, OB
+    故障恢复特点：
+    • 自动检测：实时监控存储状态
+    • 快速切换：最小化服务中断时间
+    • 数据保护：确保已提交数据不丢失
+    • 渐进恢复：逐步恢复服务能力
+    • 状态一致：维护集群状态一致性
+end note
+@enduml

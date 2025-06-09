@@ -1,0 +1,247 @@
+@startuml Kafka APIs 请求处理架构图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam componentBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+' 为不同层次的组件设置不同的背景色
+skinparam component {
+    BackgroundColor<<handler>> #E8F5E8
+    BackgroundColor<<apis>> #E3F2FD
+    BackgroundColor<<auth>> #FFF8E1
+    BackgroundColor<<quota>> #FCE4EC
+    BackgroundColor<<coordinator>> #E0F2F1
+    BackgroundColor<<replica>> #FFF3E0
+    BackgroundColor<<metadata>> #F3E5F5
+    BackgroundColor<<channel>> #FFEBEE
+}
+
+title Kafka APIs 请求处理架构图
+
+package "请求处理线程池 (KafkaRequestHandlerPool)" {
+    [KafkaRequestHandler-1] <<handler>> as KRH1
+    [KafkaRequestHandler-2] <<handler>> as KRH2
+    [KafkaRequestHandler-N] <<handler>> as KRHN
+    [ThreadPoolManager] <<handler>> as TPM
+}
+
+package "请求通道 (RequestChannel)" {
+    [RequestQueue] <<channel>> as RQ
+    [ResponseQueue] <<channel>> as RSQ
+    [CallbackQueue] <<channel>> as CQ
+    [RequestChannelMetrics] <<channel>> as RCM
+}
+
+package "核心 API 处理器 (KafkaApis)" {
+    [KafkaApis] <<apis>> as KAPI
+    [RequestRouter] <<apis>> as RR
+    [RequestHelper] <<apis>> as RH
+    [ConfigHelper] <<apis>> as CH
+}
+
+package "权限和安全 (Security)" {
+    [AuthHelper] <<auth>> as AH
+    [Authorizer] <<auth>> as AUTH
+    [AclApis] <<auth>> as ACLAPI
+    [DelegationTokenManager] <<auth>> as DTM
+}
+
+package "配额管理 (Quota)" {
+    [QuotaManagers] <<quota>> as QM
+    [ClientQuotaManager] <<quota>> as CQM
+    [RequestQuotaManager] <<quota>> as RQM
+    [ConnectionQuotaManager] <<quota>> as CONQM
+}
+
+package "协调器组件 (Coordinators)" {
+    [GroupCoordinator] <<coordinator>> as GC
+    [TransactionCoordinator] <<coordinator>> as TC
+    [ShareCoordinator] <<coordinator>> as SC
+}
+
+package "副本和存储 (Replica & Storage)" {
+    [ReplicaManager] <<replica>> as RM
+    [LogManager] <<replica>> as LM
+    [FetchManager] <<replica>> as FM
+    [SharePartitionManager] <<replica>> as SPM
+}
+
+package "元数据管理 (Metadata)" {
+    [MetadataCache] <<metadata>> as MC
+    [ForwardingManager] <<metadata>> as FWM
+    [AutoTopicCreationManager] <<metadata>> as ATCM
+    [ApiVersionManager] <<metadata>> as AVM
+}
+
+' 请求处理流程 - 连接线颜色与目标组件背景色对应
+KRH1 -[#FFEBEE]-> RQ : receiveRequest()
+KRH2 -[#FFEBEE]-> RQ : receiveRequest()
+KRHN -[#FFEBEE]-> RQ : receiveRequest()
+
+RQ -[#E3F2FD]-> KAPI : 请求分发
+KAPI -[#E3F2FD]-> RR : 路由请求
+RR -[#E3F2FD]-> RH : 辅助处理
+
+' API 处理器依赖
+KAPI -[#FFF8E1]-> AH : 权限检查
+KAPI -[#FCE4EC]-> QM : 配额管理
+KAPI -[#F3E5F5]-> MC : 元数据查询
+KAPI -[#E0F2F1]-> GC : 组协调
+KAPI -[#E0F2F1]-> TC : 事务协调
+KAPI -[#E0F2F1]-> SC : 共享协调
+KAPI -[#FFF3E0]-> RM : 副本管理
+
+' 权限和安全组件
+AH -[#FFF8E1]-> AUTH : 授权检查
+AH -[#FFF8E1]-> ACLAPI : ACL 处理
+KAPI -[#FFF8E1]-> DTM : 令牌管理
+
+' 配额管理组件
+QM -[#FCE4EC]-> CQM : 客户端配额
+QM -[#FCE4EC]-> RQM : 请求配额
+QM -[#FCE4EC]-> CONQM : 连接配额
+
+' 副本和存储组件
+RM -[#FFF3E0]-> LM : 日志管理
+KAPI -[#FFF3E0]-> FM : 获取管理
+KAPI -[#FFF3E0]-> SPM : 共享分区管理
+
+' 元数据组件
+KAPI -[#F3E5F5]-> FWM : 请求转发
+KAPI -[#F3E5F5]-> ATCM : 自动主题创建
+KAPI -[#F3E5F5]-> AVM : API 版本管理
+
+' 响应处理
+KAPI -[#FFEBEE]-> RSQ : sendResponse()
+RSQ -[#E8F5E8]-> KRH1 : 响应处理
+RSQ -[#E8F5E8]-> KRH2 : 响应处理
+RSQ -[#E8F5E8]-> KRHN : 响应处理
+
+' 线程池管理
+TPM -[#E8F5E8]-> KRH1 : 管理线程
+TPM -[#E8F5E8]-> KRH2 : 管理线程
+TPM -[#E8F5E8]-> KRHN : 管理线程
+
+' 监控指标
+RCM -[#FFEBEE]-> RQ : 队列监控
+RCM -[#FFEBEE]-> RSQ : 响应监控
+RCM -[#FFEBEE]-> CQ : 回调监控
+
+note as RequestFlow
+    <b>请求处理流程：</b>
+    1. KafkaRequestHandler 从 RequestQueue 获取请求
+    2. 调用 KafkaApis.handle() 进行请求路由
+    3. 根据 ApiKey 分发到具体的处理方法
+    4. 进行权限检查和配额验证
+    5. 调用相应的管理器处理业务逻辑
+    6. 构建响应并发送到 ResponseQueue
+    7. 网络层将响应返回给客户端
+end note
+
+note as ApiTypes
+    <b>主要 API 类型：</b>
+    
+    <b>数据操作：</b>
+    • PRODUCE：生产消息
+    • FETCH：消费消息
+    • LIST_OFFSETS：查询偏移量
+    
+    <b>元数据操作：</b>
+    • METADATA：获取主题元数据
+    • DESCRIBE_CONFIGS：查询配置
+    • ALTER_CONFIGS：修改配置
+    
+    <b>组管理：</b>
+    • JOIN_GROUP：加入消费者组
+    • HEARTBEAT：心跳检测
+    • OFFSET_COMMIT：提交偏移量
+    • OFFSET_FETCH：获取偏移量
+    
+    <b>事务操作：</b>
+    • INIT_PRODUCER_ID：初始化生产者ID
+    • ADD_PARTITIONS_TO_TXN：添加分区到事务
+    • END_TXN：结束事务
+    
+    <b>管理操作：</b>
+    • CREATE_TOPICS：创建主题
+    • DELETE_TOPICS：删除主题
+    • CREATE_ACLS：创建ACL
+end note
+
+note as PerformanceFeatures
+    <b>性能特性：</b>
+    
+    <b>并发处理：</b>
+    • 多线程请求处理池
+    • 无锁队列设计
+    • 异步回调机制
+    
+    <b>权限优化：</b>
+    • 批量权限检查
+    • 权限缓存机制
+    • 细粒度权限控制
+    
+    <b>配额管理：</b>
+    • 多维度配额控制
+    • 动态配额调整
+    • 平滑限流算法
+    
+    <b>内存管理：</b>
+    • 请求缓冲区复用
+    • 零拷贝优化
+    • 内存池管理
+end note
+
+note as ErrorHandling
+    <b>错误处理机制：</b>
+    
+    <b>异常分类：</b>
+    • 权限异常：返回相应错误码
+    • 配额异常：触发限流机制
+    • 业务异常：返回业务错误
+    • 系统异常：记录日志并优雅降级
+    
+    <b>容错设计：</b>
+    • 单个请求失败不影响其他请求
+    • 组件故障时的降级策略
+    • 超时机制防止资源泄露
+    • 重试机制处理临时故障
+end note
+
+' 源码位置标注
+note top of KAPI
+    <b>源码位置：</b>
+    core/src/main/scala/kafka/server/KafkaApis.scala
+    
+    <b>关键方法：</b>
+    • handle(): 统一请求入口
+    • handleProduceRequest(): 生产请求处理
+    • handleFetchRequest(): 消费请求处理
+    • handleTopicMetadataRequest(): 元数据请求处理
+end note
+
+note top of KRH1
+    <b>源码位置：</b>
+    core/src/main/scala/kafka/server/KafkaRequestHandler.scala
+    
+    <b>关键方法：</b>
+    • run(): 主处理循环
+    • receiveRequest(): 接收请求
+    • 线程池动态调整支持
+end note
+
+note top of RQ
+    <b>源码位置：</b>
+    core/src/main/scala/kafka/network/RequestChannel.scala
+    
+    <b>关键特性：</b>
+    • 阻塞队列实现
+    • 请求优先级处理
+    • 回调队列支持
+    • 丰富的监控指标
+end note
+
+@enduml

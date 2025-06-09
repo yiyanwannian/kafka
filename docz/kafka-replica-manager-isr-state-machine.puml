@@ -1,0 +1,53 @@
+@startuml ISR_State_Machine
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+state "ISR Management" as ISR_ROOT {
+    state "Replica States" as REPLICA_STATES {
+        state "In-Sync" as IN_SYNC #C8E6C9
+        state "Out-of-Sync" as OUT_SYNC #FFCDD2
+        state "Catching-Up" as CATCHING_UP #FFF9C4
+    }
+    
+    state "ISR Operations" as ISR_OPS {
+        state "Expand ISR" as EXPAND #E3F2FD
+        state "Shrink ISR" as SHRINK #F3E5F5
+        state "AlterPartition" as ALTER #E8F5E8
+    }
+}
+
+[*] --> OUT_SYNC : "New Replica"
+
+OUT_SYNC --> CATCHING_UP : "LEO advancing\ntowards HW"
+CATCHING_UP --> IN_SYNC : "LEO >= HW &&\nLEO >= Leader Epoch Start"
+IN_SYNC --> OUT_SYNC : "lastCaughtUpTime >\nreplicaLagTimeMaxMs"
+
+IN_SYNC --> EXPAND : "needsExpandIsr()"
+OUT_SYNC --> SHRINK : "getOutOfSyncReplicas()"
+
+EXPAND --> ALTER : "prepareIsrExpand()"
+SHRINK --> ALTER : "prepareIsrShrink()"
+ALTER --> [*] : "Controller Response"
+
+note right of CATCHING_UP
+  追赶条件：
+  • Follower LEO 接近 Leader HW
+  • 在 replicaLagTimeMaxMs 时间内
+  • Leader Epoch 有效
+end note
+
+note left of SHRINK
+  收缩触发：
+  • 定时检查 (replicaLagTimeMaxMs/2)
+  • 副本超时未同步
+  • 不在最小 ISR 要求内
+end note
+
+note bottom of ALTER
+  Controller 处理：
+  • 验证请求合法性
+  • 更新 ZK/KRaft 元数据
+  • 广播 LeaderAndIsr 响应
+  • 更新本地 ISR 状态
+end note
+@enduml

@@ -1,0 +1,63 @@
+@startuml Leader_Follower_State_Transition
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+state "Replica States" as ROOT {
+    state "Follower" as FOLLOWER #E3F2FD {
+        state "Fetching" as FETCHING
+        state "Syncing" as SYNCING
+        state "Lagging" as LAGGING
+    }
+    
+    state "Leader" as LEADER #E8F5E8 {
+        state "Active" as ACTIVE
+        state "Shrinking ISR" as SHRINKING
+        state "Expanding ISR" as EXPANDING
+    }
+    
+    state "Offline" as OFFLINE #FFCDD2
+}
+
+[*] --> FOLLOWER : "Initial State"
+
+FOLLOWER --> LEADER : "LeaderAndIsr Request\n(become leader)"
+LEADER --> FOLLOWER : "LeaderAndIsr Request\n(become follower)"
+
+FETCHING --> SYNCING : "Catch up to HW"
+SYNCING --> FETCHING : "Fall behind"
+SYNCING --> LAGGING : "Timeout"
+LAGGING --> SYNCING : "Catch up"
+
+ACTIVE --> SHRINKING : "Replica timeout"
+SHRINKING --> ACTIVE : "ISR shrink complete"
+ACTIVE --> EXPANDING : "Replica catch up"
+EXPANDING --> ACTIVE : "ISR expand complete"
+
+FOLLOWER --> OFFLINE : "Storage failure"
+LEADER --> OFFLINE : "Storage failure"
+OFFLINE --> FOLLOWER : "Recovery complete"
+
+note right of LEADER
+  Leader 职责：
+  • 处理生产者请求
+  • 管理 ISR 集合
+  • 计算高水位
+  • 处理 Follower 拉取
+end note
+
+note left of FOLLOWER
+  Follower 职责：
+  • 从 Leader 拉取数据
+  • 更新本地日志
+  • 报告同步状态
+  • 参与 ISR 维护
+end note
+
+note bottom of OFFLINE
+  离线处理：
+  • 标记分区不可用
+  • 触发 Leader 重选
+  • 等待存储恢复
+  • 重新加入集群
+end note
+@enduml

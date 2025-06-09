@@ -286,6 +286,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
     /**
      * The coordinator runtime.
      */
+    // 第二层：运行时核心组件
     private final CoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime;
 
     /**
@@ -311,11 +312,13 @@ public class GroupCoordinatorService implements GroupCoordinator {
     /**
      * Boolean indicating whether the coordinator is active or not.
      */
+    // 第一层：服务状态管理
     private final AtomicBoolean isActive = new AtomicBoolean(false);
 
     /**
      * The set of supported consumer group assignors.
      */
+    // 第三层：业务逻辑支持
     private final Set<String> consumerGroupAssignors;
 
     /**

@@ -1,0 +1,90 @@
+@startuml Log_Append_Flow
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+participant "Producer" as PROD #E3F2FD
+participant "KafkaApis" as API #F3E5F5
+participant "ReplicaManager" as RM #E8F5E8
+participant "Partition" as PART #FFF3E0
+participant "UnifiedLog" as LOG #FCE4EC
+participant "LogSegment" as SEG #E1F5FE
+
+group 请求验证阶段
+    PROD -> API : ProduceRequest
+    API -> RM : appendRecords()
+    
+    RM -> RM : 验证请求参数
+    note right : 检查 acks, timeout, 权限等
+    
+    RM -> RM : 检查内部主题权限
+    note right : 内部主题需要特殊权限
+end
+
+group 分区处理阶段
+    loop 每个分区
+        RM -> PART : appendRecordsToLeader()
+        activate PART
+        
+        PART -> PART : 验证 Leader 身份
+        note right : 确保当前是 Leader
+        
+        PART -> PART : 检查生产者状态
+        note right : 验证 PID, Epoch, Sequence
+        
+        PART -> LOG : append(records)
+        activate LOG
+        
+        LOG -> LOG : 验证消息格式
+        note right : 检查 magic, CRC, 压缩等
+        
+        LOG -> LOG : 分配偏移量
+        note right : 连续递增的偏移量
+        
+        LOG -> SEG : append(records)
+        activate SEG
+        SEG -> SEG : 写入文件系统
+        SEG -> LOG : 返回写入结果
+        deactivate SEG
+        
+        LOG -> LOG : 更新索引
+        note right : 更新 OffsetIndex, TimeIndex
+        
+        LOG -> PART : LogAppendInfo
+        deactivate LOG
+        
+        PART -> PART : 更新高水位
+        note right : maybeIncrementLeaderHW()
+        
+        PART -> PART : 更新生产者状态
+        note right : 更新 PID 映射和事务状态
+        
+        PART -> RM : LogAppendResult
+        deactivate PART
+    end
+end
+
+group 响应处理阶段
+    RM -> RM : 收集所有结果
+    
+    alt acks = 0
+        RM -> API : 立即响应
+    else acks = 1
+        RM -> RM : 等待 Leader 写入完成
+        RM -> API : 响应
+    else acks = -1 (all)
+        RM -> RM : 等待 ISR 副本同步
+        note right : 使用 DelayedProduce
+        RM -> API : 响应 (异步)
+    end
+    
+    API -> PROD : ProduceResponse
+end
+
+note over PROD, SEG
+    关键特性：
+    • 原子性：批次内消息要么全部成功要么全部失败
+    • 顺序性：分区内消息严格有序
+    • 持久性：根据 acks 参数保证不同级别的持久性
+    • 幂等性：通过 PID + Epoch + Sequence 保证
+end note
+@enduml

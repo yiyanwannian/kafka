@@ -1,0 +1,265 @@
+@startuml Kafka APIs 请求处理流程时序图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam participantBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+title Kafka APIs 请求处理完整流程
+
+participant "客户端" as Client
+participant "SocketServer" as SS
+participant "RequestChannel" as RC
+participant "KafkaRequestHandler" as KRH
+participant "KafkaApis" as KAPI
+participant "AuthHelper" as AH
+participant "QuotaManager" as QM
+participant "ReplicaManager" as RM
+participant "MetadataCache" as MC
+
+autonumber
+
+== 1. 请求接收阶段 ==
+
+Client -> SS: 发送请求 (ProduceRequest)
+activate SS
+note right: 网络层接收请求
+
+SS -> RC: sendRequest(request)
+activate RC
+note right: 源码位置：RequestChannel.scala\nsendRequest() 方法
+
+RC -> RC: requestQueue.offer(request)
+note right: 请求入队等待处理
+
+deactivate SS
+
+== 2. 请求处理阶段 ==
+
+KRH -> RC: receiveRequest(300ms)
+activate KRH
+note right: 源码位置：KafkaRequestHandler.scala\nrun() 方法主循环
+
+RC -> KRH: 返回请求对象
+deactivate RC
+
+KRH -> KRH: 记录请求出队时间
+note right: request.requestDequeueTimeNanos = endTime
+
+KRH -> KAPI: apis.handle(request, requestLocal)
+activate KAPI
+note right: 源码位置：KafkaApis.scala:150-262\nhandle() 统一入口
+
+== 3. 请求路由和验证 ==
+
+KAPI -> KAPI: 检查 API 版本
+note right: apiVersionManager.isApiEnabled()
+
+KAPI -> KAPI: 请求路由
+note right
+    request.header.apiKey match {
+      case ApiKeys.PRODUCE => handleProduceRequest()
+      case ApiKeys.FETCH => handleFetchRequest()
+      case ApiKeys.METADATA => handleTopicMetadataRequest()
+      // ...
+    }
+end note
+
+alt 生产请求处理
+    KAPI -> KAPI: handleProduceRequest(request, requestLocal)
+    note right: 源码位置：KafkaApis.scala:387-550
+
+    KAPI -> AH: 事务权限检查
+    activate AH
+    note right: authHelper.authorize(WRITE, TRANSACTIONAL_ID)
+    AH -> KAPI: 权限检查结果
+    deactivate AH
+
+    KAPI -> KAPI: 解析主题和分区数据
+    note right
+        解析 TopicIdPartition
+        处理主题ID和主题名称映射
+    end note
+
+    KAPI -> AH: 主题权限过滤
+    activate AH
+    note right: authHelper.filterByAuthorized(WRITE, TOPIC)
+    AH -> KAPI: 授权主题列表
+    deactivate AH
+
+    KAPI -> KAPI: 数据验证和分类
+    note right
+        分离授权/未授权主题
+        验证消息格式
+        构建响应映射
+    end note
+
+    KAPI -> RM: replicaManager.handleProduceAppend(...)
+    activate RM
+    note right
+        调用副本管理器
+        追加消息到日志
+    end note
+
+    RM -> RM: appendToLocalLog()
+    note right: 写入本地日志
+
+    RM -> KAPI: 回调 sendResponseCallback()
+    deactivate RM
+
+else 消费请求处理
+    KAPI -> KAPI: handleFetchRequest(request)
+    note right: 源码位置：KafkaApis.scala:554-650
+
+    KAPI -> MC: 获取主题名称映射
+    activate MC
+    note right: metadataCache.topicIdsToNames()
+    MC -> KAPI: 主题映射
+    deactivate MC
+
+    KAPI -> KAPI: 创建获取上下文
+    note right: fetchManager.newContext()
+
+    KAPI -> AH: 权限验证
+    activate AH
+    note right: authHelper.filterByAuthorized(READ, TOPIC)
+    AH -> KAPI: 授权分区列表
+    deactivate AH
+
+    KAPI -> RM: replicaManager.fetchMessages(...)
+    activate RM
+    note right: 从副本管理器获取消息
+    RM -> KAPI: 回调 processResponseCallback()
+    deactivate RM
+
+else 元数据请求处理
+    KAPI -> KAPI: handleTopicMetadataRequest(request)
+    note right: 源码位置：KafkaApis.scala:871-993
+
+    KAPI -> KAPI: 版本兼容性检查
+    note right: 检查主题ID支持版本
+
+    KAPI -> MC: 获取主题信息
+    activate MC
+    note right
+        metadataCache.getAllTopics()
+        metadataCache.getPartitionMetadata()
+    end note
+    MC -> KAPI: 主题元数据
+    deactivate MC
+
+    KAPI -> AH: 权限过滤
+    activate AH
+    note right: authHelper.filterByAuthorized(DESCRIBE, TOPIC)
+    AH -> KAPI: 授权主题列表
+    deactivate AH
+
+    KAPI -> KAPI: 构建元数据响应
+    note right
+        构建主题元数据
+        获取 Broker 信息
+        获取控制器信息
+    end note
+end
+
+== 4. 配额检查和限流 ==
+
+KAPI -> QM: 检查配额
+activate QM
+note right: quotaManagers.request.maybeRecordAndGetThrottleTimeMs()
+QM -> KAPI: 限流时间
+deactivate QM
+
+== 5. 响应发送阶段 ==
+
+KAPI -> KAPI: 构建响应对象
+note right
+    根据处理结果构建响应
+    设置错误码和数据
+end note
+
+KAPI -> RC: requestHelper.sendResponseMaybeThrottle()
+activate RC
+note right: 发送响应到通道
+
+RC -> RC: responseQueue.offer(response)
+note right: 响应入队
+
+RC -> SS: 通知有响应待发送
+deactivate RC
+
+KAPI -> KAPI: 完成延迟操作
+note right: replicaManager.tryCompleteActions()
+
+KAPI -> KRH: 处理完成
+deactivate KAPI
+
+KRH -> KRH: 资源清理
+note right
+    threadCurrentRequest.remove()
+    request.releaseBuffer()
+end note
+
+deactivate KRH
+
+== 6. 响应返回阶段 ==
+
+SS -> RC: 获取响应
+activate SS
+activate RC
+
+RC -> SS: 返回响应对象
+deactivate RC
+
+SS -> Client: 发送响应
+deactivate SS
+note right: 网络层返回响应给客户端
+
+== 关键设计特点 ==
+
+note over Client, MC
+    <b>架构特点：</b>
+    
+    <b>异步处理：</b>
+    • 请求和响应通过队列解耦
+    • 支持异步回调机制
+    • 非阻塞的网络 I/O
+    
+    <b>权限控制：</b>
+    • 多层次权限检查
+    • 批量权限验证优化
+    • 细粒度资源控制
+    
+    <b>配额管理：</b>
+    • 请求级别配额控制
+    • 平滑限流算法
+    • 动态配额调整
+    
+    <b>错误处理：</b>
+    • 统一异常处理机制
+    • 优雅降级策略
+    • 详细错误码返回
+end note
+
+note over KAPI, RM
+    <b>性能优化：</b>
+    
+    <b>批量处理：</b>
+    • 批量权限检查
+    • 批量消息处理
+    • 批量响应构建
+    
+    <b>缓存利用：</b>
+    • 元数据缓存
+    • 权限缓存
+    • 连接缓存
+    
+    <b>内存管理：</b>
+    • 缓冲区复用
+    • 零拷贝优化
+    • 及时资源释放
+end note
+
+@enduml

@@ -1,0 +1,151 @@
+@startuml Kafka APIs 架构图（简化版）
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam componentBorderColor #6C757D
+skinparam arrowColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+' 为不同层次的组件设置不同的背景色
+skinparam component {
+    BackgroundColor<<network>> #E8F5E8
+    BackgroundColor<<handler>> #E3F2FD
+    BackgroundColor<<apis>> #FFF3E0
+    BackgroundColor<<manager>> #FCE4EC
+    BackgroundColor<<storage>> #F3E5F5
+}
+
+title Kafka APIs 请求处理架构
+
+package "网络层" {
+    [SocketServer] <<network>> as SS
+    [RequestChannel] <<network>> as RC
+}
+
+package "请求处理层" {
+    [KafkaRequestHandler\n线程池] <<handler>> as KRH
+    [KafkaApis\n统一入口] <<apis>> as KAPI
+}
+
+package "业务管理层" {
+    [ReplicaManager\n副本管理] <<manager>> as RM
+    [GroupCoordinator\n组协调] <<manager>> as GC
+    [TransactionCoordinator\n事务协调] <<manager>> as TC
+}
+
+package "权限和配额" {
+    [AuthHelper\n权限检查] <<manager>> as AH
+    [QuotaManagers\n配额管理] <<manager>> as QM
+}
+
+package "元数据和存储" {
+    [MetadataCache\n元数据缓存] <<storage>> as MC
+    [LogManager\n日志管理] <<storage>> as LM
+}
+
+' 主要数据流向
+SS -[#E3F2FD]-> RC : 1. 接收请求
+RC -[#E3F2FD]-> KRH : 2. 请求入队
+KRH -[#FFF3E0]-> KAPI : 3. 调用处理
+
+' API 处理流程
+KAPI -[#FCE4EC]-> AH : 4a. 权限检查
+KAPI -[#FCE4EC]-> QM : 4b. 配额验证
+KAPI -[#F3E5F5]-> MC : 4c. 元数据查询
+
+' 业务处理分发
+KAPI -[#FCE4EC]-> RM : 5a. 生产/消费请求
+KAPI -[#FCE4EC]-> GC : 5b. 组管理请求
+KAPI -[#FCE4EC]-> TC : 5c. 事务请求
+
+' 存储操作
+RM -[#F3E5F5]-> LM : 6. 日志读写
+
+' 响应返回
+KAPI -[#E3F2FD]-> RC : 7. 发送响应
+RC -[#E8F5E8]-> SS : 8. 响应出队
+
+note as RequestTypes
+    <b>主要请求类型：</b>
+    
+    <b>数据操作</b>
+    • PRODUCE → ReplicaManager
+    • FETCH → ReplicaManager
+    • LIST_OFFSETS → ReplicaManager
+    
+    <b>组管理</b>
+    • JOIN_GROUP → GroupCoordinator
+    • HEARTBEAT → GroupCoordinator
+    • OFFSET_COMMIT → GroupCoordinator
+    
+    <b>事务操作</b>
+    • INIT_PRODUCER_ID → TransactionCoordinator
+    • ADD_PARTITIONS_TO_TXN → TransactionCoordinator
+    • END_TXN → TransactionCoordinator
+    
+    <b>元数据操作</b>
+    • METADATA → MetadataCache
+    • DESCRIBE_CONFIGS → MetadataCache
+end note
+
+note as ProcessFlow
+    <b>请求处理流程：</b>
+    
+    1. <b>网络接收</b>：SocketServer 接收客户端请求
+    2. <b>请求排队</b>：RequestChannel 管理请求队列
+    3. <b>线程处理</b>：KafkaRequestHandler 从队列获取请求
+    4. <b>统一路由</b>：KafkaApis 根据 ApiKey 路由请求
+    5. <b>权限验证</b>：AuthHelper 检查操作权限
+    6. <b>配额检查</b>：QuotaManagers 验证请求配额
+    7. <b>业务处理</b>：相应管理器处理具体业务逻辑
+    8. <b>响应返回</b>：通过 RequestChannel 返回响应
+end note
+
+note as KeyFeatures
+    <b>核心特性：</b>
+    
+    <b>高并发</b>
+    • 多线程请求处理池
+    • 异步回调机制
+    • 无锁队列设计
+    
+    <b>安全控制</b>
+    • 统一权限检查
+    • 细粒度资源控制
+    • 多维度配额管理
+    
+    <b>高性能</b>
+    • 批量权限验证
+    • 元数据缓存
+    • 零拷贝优化
+    
+    <b>可扩展</b>
+    • 插件化权限系统
+    • 动态配额调整
+    • 模块化组件设计
+end note
+
+' 源码位置简化标注
+note top of KAPI
+    <b>KafkaApis</b>
+'    core/src/main/scala/kafka/server/KafkaApis.scala
+    • handle(): 统一请求入口
+    • 路由到具体处理方法
+end note
+
+note top of KRH
+    <b>KafkaRequestHandler</b>
+'    core/src/main/scala/kafka/server/KafkaRequestHandler.scala
+    • run(): 主处理循环
+    • 多线程并发处理
+end note
+
+note top of RC
+    <b>RequestChannel</b>
+'    core/src/main/scala/kafka/network/RequestChannel.scala
+    • 请求/响应队列管理
+    • 支持优先级处理
+end note
+
+@enduml

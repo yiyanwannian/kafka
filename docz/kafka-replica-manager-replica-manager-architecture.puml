@@ -1,0 +1,70 @@
+@startuml ReplicaManager_Architecture
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam componentStyle rectangle
+
+package "Kafka Broker" {
+    component "KafkaApis" as KA #E3F2FD
+    component "ReplicaManager" as RM #E8F5E8 {
+        component "Partition Management" as PM #F3E5F5
+        component "ISR Management" as ISR #FFF3E0
+        component "Log Append" as LA #FCE4EC
+        component "Replica Sync" as RS #E0F2F1
+    }
+    
+    component "LogManager" as LM #F1F8E9
+    component "DelayedOperationPurgatory" as DOP #FFF8E1
+    component "MetadataCache" as MC #E8EAF6
+    component "Scheduler" as SCH #EFEBE9
+}
+
+package "Storage Layer" {
+    component "UnifiedLog" as UL #E1F5FE
+    component "LogSegment" as LS #F3E5F5
+    component "OffsetIndex" as OI #E8F5E8
+    component "TimeIndex" as TI #FFF3E0
+}
+
+package "Network Layer" {
+    component "ReplicaFetcherManager" as RFM #FCE4EC
+    component "ReplicaAlterLogDirsManager" as RALDM #E0F2F1
+}
+
+' 连接关系
+KA --> RM : "Produce/Fetch Requests"
+RM --> PM : "manages"
+RM --> ISR : "maintains"
+RM --> LA : "coordinates"
+RM --> RS : "handles"
+
+PM --> LM : "delegates to"
+LA --> UL : "appends to"
+RS --> RFM : "uses"
+
+LM --> UL : "manages"
+UL --> LS : "contains"
+UL --> OI : "maintains"
+UL --> TI : "maintains"
+
+RM --> DOP : "schedules operations"
+RM --> MC : "queries metadata"
+RM --> SCH : "schedules tasks"
+RM --> RALDM : "manages log dirs"
+
+note right of RM
+  核心职责：
+  • 副本状态管理
+  • ISR 动态维护
+  • 高水位计算
+  • 日志追加协调
+  • 故障检测恢复
+end note
+
+note bottom of UL
+  存储层特点：
+  • 分段存储
+  • 索引加速
+  • 压缩支持
+  • 事务日志
+end note
+@enduml

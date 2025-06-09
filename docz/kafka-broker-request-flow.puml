@@ -9,6 +9,8 @@ skinparam noteBorderColor #FFEAA7
 
 title Kafka Broker 请求处理完整流程
 
+autonumber
+
 participant "生产者客户端" as Producer
 participant "Acceptor线程" as Acceptor
 participant "Processor线程" as Processor

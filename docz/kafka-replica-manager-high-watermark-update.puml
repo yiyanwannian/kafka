@@ -1,0 +1,75 @@
+@startuml High_Watermark_Update
+!theme plain
+skinparam backgroundColor #FFFFFF
+
+participant "Producer" as P #E3F2FD
+participant "Leader" as L #E8F5E8
+participant "Follower-1" as F1 #F3E5F5
+participant "Follower-2" as F2 #FFF3E0
+participant "High Watermark" as HW #FCE4EC
+
+group 消息生产阶段
+    P -> L : ProduceRequest(messages)
+    activate L
+    L -> L : appendToLocalLog()
+    note right : Leader LEO = 100
+    L -> P : ProduceResponse(ack)
+    deactivate L
+end
+
+group 副本同步阶段
+    F1 -> L : FetchRequest(offset=95)
+    activate L
+    L -> F1 : FetchResponse(messages)
+    L -> L : updateFollowerFetchState(F1, LEO=98)
+    note right : F1 LEO = 98
+    deactivate L
+    
+    F2 -> L : FetchRequest(offset=90)
+    activate L
+    L -> F2 : FetchResponse(messages)
+    L -> L : updateFollowerFetchState(F2, LEO=92)
+    note right : F2 LEO = 92
+    deactivate L
+end
+
+group 高水位计算阶段
+    L -> L : maybeIncrementLeaderHW()
+    activate L
+    
+    note over L
+        计算新高水位：
+        Leader LEO = 100
+        F1 LEO = 98 (in ISR)
+        F2 LEO = 92 (in ISR)
+        
+        newHW = min(100, 98, 92) = 92
+    end note
+    
+    L -> HW : updateHighWatermark(92)
+    activate HW
+    HW -> HW : 检查 newHW > oldHW
+    HW -> L : 高水位更新成功
+    deactivate HW
+    
+    L -> L : tryCompleteDelayedRequests()
+    note right : 触发延迟操作完成
+    deactivate L
+end
+
+group 检查点持久化
+    L -> L : checkpointHighWatermarks()
+    activate L
+    L -> L : 写入高水位到检查点文件
+    note right : 持久化到磁盘
+    deactivate L
+end
+
+note over P, HW
+    高水位特性：
+    • 只有 HW 之前的消息对消费者可见
+    • HW 由 ISR 中最小的 LEO 决定
+    • HW 更新触发延迟操作完成
+    • 定期持久化到检查点文件
+end note
+@enduml
