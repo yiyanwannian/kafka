@@ -1,0 +1,241 @@
+@startuml Kafka 源码阅读路线图
+
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam packageBorderColor #6C757D
+skinparam classBorderColor #495057
+skinparam noteBackgroundColor #FFF3CD
+skinparam noteBorderColor #FFEAA7
+
+title Apache Kafka 源码深度阅读路线图
+
+package "第一阶段：基础架构理解 (1-2周)" as Stage1 {
+    package "项目结构" as Structure {
+        class "模块划分" as Modules {
+            + clients/ : 客户端核心库
+            + core/ : Broker 核心实现
+            + raft/ : KRaft 协议实现
+            + metadata/ : 元数据管理
+            + storage/ : 存储抽象层
+        }
+        
+        class "依赖关系" as Dependencies {
+            + settings.gradle : 模块配置
+            + build.gradle : 构建配置
+            + gradle/dependencies.gradle : 依赖管理
+        }
+    }
+    
+    package "核心概念" as Concepts {
+        class "数据结构" as DataStructures {
+            + TopicPartition.java
+            + Node.java
+            + Cluster.java
+            + Record.java
+            + RecordBatch.java
+        }
+        
+        class "网络协议" as Protocol {
+            + ApiKeys.java
+            + requests/ 包
+            + protocol/ 包
+            + network/ 包
+        }
+    }
+    
+    package "网络通信" as Network {
+        class "NIO模型" as NIO {
+            + Selector.java
+            + KafkaChannel.java
+            + NetworkClient.java
+            + TransportLayer.java
+        }
+    }
+}
+
+package "第二阶段：核心机制深入 (2-3周)" as Stage2 {
+    package "请求处理" as RequestProcessing {
+        class "网络层" as NetworkLayer {
+            + SocketServer.scala
+            + RequestChannel.scala
+            + Processor.scala
+        }
+        
+        class "处理层" as ProcessingLayer {
+            + KafkaRequestHandler.scala
+            + KafkaApis.scala
+            + AuthHelper.scala
+        }
+    }
+    
+    package "日志存储" as LogStorage {
+        class "日志管理" as LogManagement {
+            + LogManager.scala
+            + UnifiedLog.scala
+            + LogSegment.scala
+        }
+        
+        class "存储实现" as StorageImpl {
+            + FileRecords.java
+            + MemoryRecords.java
+            + OffsetIndex.scala
+            + TimeIndex.scala
+        }
+    }
+    
+    package "副本管理" as ReplicaManagement {
+        class "副本同步" as ReplicaSync {
+            + ReplicaManager.scala
+            + Partition.scala
+            + ReplicaFetcherManager.scala
+        }
+        
+        class "延迟操作" as DelayedOps {
+            + DelayedProduce.scala
+            + DelayedFetch.scala
+            + DelayedOperation.scala
+        }
+    }
+}
+
+package "第三阶段：分布式协调 (2-3周)" as Stage3 {
+    package "控制器实现" as Controller {
+        class "KRaft控制器" as KRaftController {
+            + QuorumController.java
+            + ReplicationControlManager.java
+            + ClusterControlManager.java
+        }
+        
+        class "传统控制器" as LegacyController {
+            + KafkaController.scala (已废弃)
+            + ControllerChannelManager.scala
+        }
+    }
+    
+    package "KRaft协议" as KRaft {
+        class "Raft客户端" as RaftClient {
+            + KafkaRaftClient.java
+            + QuorumState.java
+            + ReplicatedLog.java
+        }
+        
+        class "状态管理" as StateManagement {
+            + EpochState.java
+            + LeaderState.java
+            + FollowerState.java
+        }
+    }
+    
+    package "元数据管理" as MetadataManagement {
+        class "元数据缓存" as MetadataCache {
+            + KRaftMetadataCache.scala
+            + MetadataImage.java
+            + MetadataSnapshot.java
+        }
+        
+        class "元数据记录" as MetadataRecords {
+            + TopicRecord.java
+            + PartitionRecord.java
+            + BrokerRecord.java
+        }
+    }
+}
+
+package "第四阶段：高级特性 (1-2周)" as Stage4 {
+    package "事务机制" as Transactions {
+        class "事务协调器" as TransactionCoordinator {
+            + TransactionCoordinator.java
+            + TransactionStateManager.java
+            + ProducerIdManager.java
+        }
+    }
+    
+    package "流处理引擎" as Streams {
+        class "Kafka Streams" as KafkaStreams {
+            + KafkaStreams.java
+            + StreamThread.java
+            + StreamTask.java
+            + StateStore.java
+        }
+    }
+    
+    package "连接器框架" as Connect {
+        class "Kafka Connect" as KafkaConnect {
+            + ConnectWorker.java
+            + SourceConnector.java
+            + SinkConnector.java
+            + TaskManager.java
+        }
+    }
+}
+
+' 学习路径箭头
+Stage1 --> Stage2 : 掌握基础后深入核心
+Stage2 --> Stage3 : 理解核心后学习协调
+Stage3 --> Stage4 : 掌握协调后探索高级特性
+
+' 模块内部关系
+Modules --> Dependencies : 理解依赖
+DataStructures --> Protocol : 基于数据结构
+Protocol --> NIO : 协议基于网络
+NetworkLayer --> ProcessingLayer : 网络到处理
+LogManagement --> StorageImpl : 管理到实现
+ReplicaSync --> DelayedOps : 同步需要延迟操作
+KRaftController --> RaftClient : 控制器使用Raft
+RaftClient --> StateManagement : 客户端管理状态
+MetadataCache --> MetadataRecords : 缓存基于记录
+
+note top of Stage1
+    <b>学习重点：</b>
+    • 理解项目整体结构
+    • 掌握核心数据结构
+    • 熟悉网络通信模型
+    • 建立基础概念框架
+end note
+
+note top of Stage2
+    <b>学习重点：</b>
+    • 掌握请求处理流程
+    • 理解日志存储机制
+    • 学习副本同步原理
+    • 深入延迟操作设计
+end note
+
+note top of Stage3
+    <b>学习重点：</b>
+    • 理解KRaft协议实现
+    • 掌握元数据管理机制
+    • 学习分布式一致性
+    • 对比新旧架构差异
+end note
+
+note top of Stage4
+    <b>学习重点：</b>
+    • 探索事务实现机制
+    • 了解流处理架构
+    • 学习连接器框架
+    • 掌握扩展开发方法
+end note
+
+note bottom
+    <b>学习建议：</b>
+    
+    <b>环境准备：</b>
+    • 使用 IntelliJ IDEA 导入项目
+    • 配置 JDK 11+ 和 Scala 2.13
+    • 启用详细日志输出
+    
+    <b>阅读方法：</b>
+    • 先读接口和抽象类理解设计
+    • 再读具体实现了解细节
+    • 结合单元测试验证理解
+    • 通过调试跟踪执行流程
+    
+    <b>实践建议：</b>
+    • 搭建本地开发环境
+    • 运行示例程序验证
+    • 尝试小的功能修改
+    • 编写测试用例加深理解
+end note
+
+@enduml
